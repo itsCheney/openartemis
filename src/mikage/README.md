@@ -11,6 +11,9 @@
 - `MikagePlatform.cpp` 是 iOS 的 `oa::plat`：窗口加入 Mikage 给的
   UIWindowScene，三指触摸打开 Mikage 菜单，帧节奏由 Mikage 的 display link
   决定（帧尾不 sleep），回到前台时重置 tick 时钟。
+- iOS 上舞台至少按 1080 行渲染（1280x720 的游戏画在 1920x1080 上，文字按同样倍数栅格化），
+  窗口使用原生像素密度；`intermediate_render` 组在 GPU 上合成（预乘 alpha + 混合模式），
+  不再每帧读回到 CPU。`OA_RENDER_HEIGHT` / `OA_GROUP_GPU` 环境变量可覆盖。
 - `MikageArtemisRuntime.h` 是对外的 C 接口（`MikageArtemis*`），其余符号全部隐藏。
 
 依赖：

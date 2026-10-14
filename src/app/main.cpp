@@ -724,6 +724,12 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 #if defined(__ANDROID__) || defined(__EMSCRIPTEN__) || defined(SDL_PLATFORM_IOS)
     win_flags = (win_flags | SDL_WINDOW_FULLSCREEN) & ~SDL_WINDOW_RESIZABLE;
 #endif
+#if defined(SDL_PLATFORM_IOS)
+    // Without it UIKit gives the window a drawable in points (a third of
+    // the panel's pixels on a 3x iPhone), which the compositor then blurs
+    // up to full size.
+    win_flags |= SDL_WINDOW_HIGH_PIXEL_DENSITY;
+#endif
     // GLES line: the window must carry SDL_WINDOW_OPENGL so the
     // backend can create its GLES context on it (SDL_GL_CreateContext); the
     // sdl line never adds the flag (SDL_Render handles its own surfaces).
@@ -825,6 +831,25 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
         std::printf("[app] immersive fullscreen disabled (OA_ANDROID_FULLSCREEN=0)\n");
     }
 #endif
+    {
+        // iOS renders the stage at 1080 rows or more (a 1280x720 game draws
+        // at 1920x1080) and composites intermediate-render groups on the
+        // GPU, so animated message windows don't stall on read-backs.
+        // OA_RENDER_HEIGHT=<rows> / OA_GROUP_GPU=0|1 override either.
+#if defined(SDL_PLATFORM_IOS)
+        int render_height = 1080;
+        bool group_gpu = true;
+#else
+        int render_height = 0;
+        bool group_gpu = false;
+#endif
+        if (const char* v = std::getenv("OA_RENDER_HEIGHT"); v && *v)
+            render_height = std::max(0, std::atoi(v));
+        if (const char* v = std::getenv("OA_GROUP_GPU"); v && *v)
+            group_gpu = std::atoi(v) != 0;
+        state->oaRender->set_min_render_height(render_height);
+        state->oaRender->set_gpu_group_composite(group_gpu);
+    }
     if (!state->oaRender->create_renderer(state->window,
                                           state->opt.renderer)) {
         std::fprintf(stderr, "[app] renderer creation failed (kind=%s): %s\n",

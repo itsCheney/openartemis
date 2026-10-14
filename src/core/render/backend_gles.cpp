@@ -36,6 +36,7 @@ enum : unsigned int {
     GL_ZERO_ = 0, GL_ONE_ = 1,
     GL_SRC_COLOR_ = 0x0300, GL_SRC_ALPHA_ = 0x0302,
     GL_ONE_MINUS_SRC_ALPHA_ = 0x0303, GL_DST_ALPHA_ = 0x0304,
+    GL_DST_COLOR_ = 0x0306,
     GL_BLEND_ = 0x0BE2, GL_SCISSOR_TEST_ = 0x0C11, GL_DEPTH_TEST_ = 0x0B71,
     GL_CULL_FACE_ = 0x0B44,
     GL_FUNC_ADD_ = 0x8006,
@@ -616,6 +617,20 @@ void GlesRenderBackend::apply_draw_state(GlesTexture* tex, BlendMode blend)
                 // dstRGB kept, dstA *= srcA (stencil mask composite)
                 glBlendFuncSeparate(GL_ZERO_, GL_ONE_, GL_DST_ALPHA_, GL_ZERO_);
                 break;
+            case BlendMode::PremultBlend:
+                glBlendFuncSeparate(GL_ONE_, GL_ONE_MINUS_SRC_ALPHA_,
+                                    GL_ONE_, GL_ONE_MINUS_SRC_ALPHA_);
+                break;
+            case BlendMode::PremultAdd:
+                glBlendFuncSeparate(GL_ONE_, GL_ONE_, GL_ZERO_, GL_ONE_);
+                break;
+            case BlendMode::PremultMul:
+                glBlendFuncSeparate(GL_DST_COLOR_, GL_ONE_MINUS_SRC_ALPHA_,
+                                    GL_ZERO_, GL_ONE_);
+                break;
+            case BlendMode::MaskMultiply:
+                glBlendFuncSeparate(GL_ZERO_, GL_SRC_ALPHA_, GL_ZERO_, GL_SRC_ALPHA_);
+                break;
             case BlendMode::None: break;
         }
         glBlendEquation(GL_FUNC_ADD_);
@@ -886,6 +901,8 @@ TextureRef GlesRenderBackend::create_texture(int w, int h,
                                              TextureAccess access)
 {
     if (!gl_context_ || w <= 0 || h <= 0) return nullptr;
+    // No stage scale on this backend: a stage target is a plain target.
+    if (access == TextureAccess::StageTarget) access = TextureAccess::Target;
     GlesTexture* gt = new GlesTexture();
     gt->w = w;
     gt->h = h;

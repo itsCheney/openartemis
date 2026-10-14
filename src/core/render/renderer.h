@@ -4,6 +4,7 @@
 #include <memory>
 #include <set>
 #include <string>
+#include <vector>
 #include <algorithm>
 
 #include "core/render/backend.h"
@@ -50,6 +51,18 @@ public:
     bool create_renderer(SDL_Window* ctx,
                          const std::string& backend_kind = "sdl");
     void release_all();
+    /// Render the stage at no less than this many pixel rows (0 = stage
+    /// size). A 1280x720 stage with 1080 draws at 1920x1080: scene, text
+    /// and group targets render at the higher resolution, while the game
+    /// keeps its own coordinates. Set before create_renderer; only the sdl
+    /// backend supports it.
+    void set_min_render_height(int rows) { min_render_height_ = rows; }
+    /// Stage pixel scale in effect (1 when not supersampling).
+    float stage_scale() const { return stage_scale_; }
+    /// Composite intermediate-render groups on the GPU: the group target is
+    /// kept premultiplied and composited with blend modes, without reading
+    /// it back. Groups with grayscale/negative still take the CPU path.
+    void set_gpu_group_composite(bool on) { gpu_group_composite_ = on; }
     /// Backend error surface (backend->last_error()) — host
     /// canaries like OA_RENDER_DIAG no longer read SDL_GetError directly,
     /// the gles backend keeps its own error text.
@@ -339,6 +352,7 @@ private:
         bool grayscale = false;
         bool negative = false;
         const oa::media::Image* mask = nullptr; // stretched mask image
+        std::string mask_name;                  // its asset name
         // clip = inherited scissor ∩ group-clip world rect; {0,0,0,0} when
         // disjoint; nullopt when no clip applies (backend state untouched).
         std::optional<IRect> clip;
@@ -485,6 +499,18 @@ private:
     // group alpha — applied via alpha-mod at draw time so alpha tweens are
     // cheap); invalidated whenever any scene mutation / animation ran.
     std::map<std::string, TextureRef> group_tex_cache;
+    // Bakes in group_tex_cache made on the GPU path: premultiplied stage
+    // targets, recycled through group_target_pool_ instead of destroyed.
+    std::set<TextureRef> gpu_group_bakes_;
+    std::vector<TextureRef> group_target_pool_;
+    bool gpu_group_composite_ = false;
+    int min_render_height_ = 0;
+    float stage_scale_ = 1.0f;
+    bool draw_group_gpu(const oa::render::Compositor& sc,
+                        const oa::render::SceneNode& node,
+                        const oa::render::Affine2& world, double parent_op,
+                        const GroupPlan& p, bool had_clip,
+                        const IRect& old_clip, size_t* drawn_out);
     // glyphs painted at node slots this frame (diagnostics).
     size_t frame_glyphs_ = 0;
     // per-frame snapshot — scene node id → drawable message ids bound

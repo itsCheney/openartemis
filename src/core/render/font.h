@@ -73,6 +73,9 @@ public:
     /// 字形纹理销毁需要后端（字形缓存在本类析构时随引擎销毁）；后端由
     /// RenderEngine 在 create_renderer 后注入。
     void set_backend(oa::render::RenderBackend* backend) { backend_ = backend; }
+    /// Glyphs rasterize at this multiple of their size (the stage pixel
+    /// scale), and draw at their size, so supersampled text stays sharp.
+    void set_raster_scale(double scale) { raster_scale_ = scale > 0 ? scale : 1.0; }
 
     FT_Face load_font_face(const std::string& logical);
     FT_Face face_for(const oa::render::FontDesc& f);
@@ -132,8 +135,12 @@ public:
     /// 绘制落点以实际栅格为准（hinting 网格差 ≤1px 与度量 load 一致）。
     struct CachedGlyph {
         oa::render::TextureRef tex = nullptr;
-        int bitmap_left = 0;
-        int bitmap_top = 0;
+        // Bearing and drawn size in stage pixels (the bitmap itself is
+        // raster_scale_ times larger).
+        double bitmap_left = 0;
+        double bitmap_top = 0;
+        double width = 0;
+        double height = 0;
     };
     CachedGlyph glyph_slot(oa::render::RenderBackend* backend, FT_Face face,
                            double size, uint32_t cp);
@@ -145,6 +152,7 @@ public:
 private:
     FT_Library ft_lib = nullptr;
     FT_Stroker stroker_ = nullptr; // 连续描边（FT_Stroker_New(ft_lib)）
+    double raster_scale_ = 1.0;
     std::map<std::string, FaceEntry> font_faces; // 逻辑 face → 已加载字体
     std::map<std::string, CachedGlyph> glyph_cache; // key face\tppem\tcp
     std::map<std::string, CachedGlyph> edge_cache;  // key face\tppem\tcp\tw\tenc

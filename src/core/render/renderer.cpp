@@ -83,6 +83,11 @@ bool RenderEngine::create_renderer(SDL_Window* ctx,
         backend_.reset();
         return false;
     }
+    stage_scale_ = 1.0f;
+    if (min_render_height_ > stage_h_ && stage_h_ > 0)
+        stage_scale_ = backend_->set_stage_scale(float(min_render_height_) /
+                                                 float(stage_h_));
+    fontSystem->set_raster_scale(stage_scale_);
     fontSystem->set_backend(backend_.get());
     // The fixed stage offscreen target. All scene drawing
     // (geometry / textures / video layers / emote canvases / group bakes)
@@ -91,11 +96,12 @@ bool RenderEngine::create_renderer(SDL_Window* ctx,
     // Backends that cannot make render targets keep the legacy
     // direct-to-window path (stage_rt == nullptr).
     stage_rt = backend_->create_texture(stage_w_, stage_h_,
-                                        TextureAccess::Target);
+                                        TextureAccess::StageTarget);
     if (stage_rt) {
         backend_->set_texture_blend(stage_rt, BlendMode::Blend);
         stage_frame_valid_ = false;
-        std::printf("[app] stage target %dx%d (offscreen)\n", stage_w_, stage_h_);
+        std::printf("[app] stage target %dx%d (offscreen, scale %.3g)\n",
+                    stage_w_, stage_h_, stage_scale_);
     } else {
         std::fprintf(stderr, "[app] no stage render target (%s); legacy "
             "direct-to-window present\n", backend_->last_error());
@@ -149,6 +155,9 @@ void RenderEngine::release_all()
     for (auto& [k, t] : group_tex_cache)
         if (t) backend_->destroy_texture(t);
     group_tex_cache.clear();
+    gpu_group_bakes_.clear();
+    for (TextureRef t : group_target_pool_) backend_->destroy_texture(t);
+    group_target_pool_.clear();
     emote_canvas_.clear();
     emote_atlases_.clear();
     textures.clear();
@@ -201,7 +210,7 @@ bool RenderEngine::capture_transition_source()
     }
     if (backend_ && stage_rt && stage_frame_valid_) {
         TextureRef tex = backend_->create_texture(stage_w_, stage_h_,
-                                                  TextureAccess::Target);
+                                                  TextureAccess::StageTarget);
         if (!tex) return false;
         backend_->set_texture_blend(tex, BlendMode::Blend);
         backend_->set_target(tex);
@@ -425,6 +434,7 @@ RenderEngine::GroupPlan RenderEngine::resolve_group_plan(
     p.negative = prop_true(layer_prop(layer, "negative"));
     if (const std::string* mv = layer_prop(layer, "intermediate_render_mask")) {
         p.mask = resolve_image(*mv);
+        if (p.mask) p.mask_name = *mv;
     }
     // composite blend onto the parent (layermode uniform)
     if (const std::string* lm = layer_prop(layer, "layermode")) {
@@ -452,8 +462,18 @@ void RenderEngine::composite_group_bake(TextureRef baked, const GroupPlan& p,
     // The bake is cached until a scene mutation / active animation
     // invalidated it: message-window / mask groups are typically static while
     // displayed, so only one CPU composite pass is needed per content change.
-    backend_->set_texture_alpha_mod(baked, alpha_byte(p.group_alpha));
-    backend_->set_texture_blend(baked, p.blend);
+    const uint8_t ga = alpha_byte(p.group_alpha);
+    backend_->set_texture_alpha_mod(baked, ga);
+    if (gpu_group_bakes_.count(baked)) {
+        // Premultiplied bake: the group alpha scales the color too.
+        backend_->set_texture_color_mod(baked, ga, ga, ga);
+        backend_->set_texture_blend(baked,
+            p.blend == BlendMode::Add   ? BlendMode::PremultAdd
+            : p.blend == BlendMode::Mod ? BlendMode::PremultMul
+                                        : BlendMode::PremultBlend);
+    } else {
+        backend_->set_texture_blend(baked, p.blend);
+    }
     if (p.clip && p.clip->w > 0 && p.clip->h > 0) {
         backend_->set_clip(*p.clip);
     }
@@ -595,8 +615,12 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
         composite_group_bake(cmit->second, p, had_clip, old_clip);
         return;
     }
+    if (gpu_group_composite_ && !p.grayscale && !p.negative &&
+        draw_group_gpu(sc, node, world, parent_op, p, had_clip, old_clip,
+                       drawn_out))
+        return;
     TextureRef group_tex = backend_->create_texture(stage_w_, stage_h_,
-                                                    TextureAccess::Target);
+                                                    TextureAccess::StageTarget);
     if (!group_tex) {
         // no offscreen possible: naive fallback (children with the group
         // alpha multiplied; only reachable when the backend cannot make
@@ -636,6 +660,63 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
         composite_group_bake(baked, p, had_clip, old_clip);
     }
     backend_->destroy_texture(group_tex);
+}
+
+bool RenderEngine::draw_group_gpu(const oa::render::Compositor& sc,
+                                  const oa::render::SceneNode& node,
+                                  const oa::render::Affine2& world,
+                                  double parent_op, const GroupPlan& p,
+                                  bool had_clip, const IRect& old_clip,
+                                  size_t* drawn_out) {
+    // GPU group composite: the group target holds the subtree premultiplied
+    // (drawn with straight-alpha "over" onto transparent black), so color
+    // multiply and the mask are blend passes on the target itself and the
+    // composite is a premultiplied blend. Equivalent to group_composite_cpu
+    // without the read-back (which waits for the GPU), the per-pixel loop
+    // and the upload, so animated message windows keep 60 fps.
+    TextureRef mask_tex = nullptr;
+    if (p.mask) {
+        mask_tex = texture_for_asset(p.mask_name);
+        if (!mask_tex) return false; // CPU path samples the decoded image
+    }
+    TextureRef group_tex = nullptr;
+    if (!group_target_pool_.empty()) {
+        group_tex = group_target_pool_.back();
+        group_target_pool_.pop_back();
+    } else {
+        group_tex = backend_->create_texture(stage_w_, stage_h_,
+                                             TextureAccess::StageTarget);
+    }
+    if (!group_tex) return false;
+    const oa::render::Layer& layer = node.layer;
+    TextureRef saved_target = begin_offscreen_pass(group_tex, p);
+    *drawn_out += draw_one(layer, world, parent_op);
+    *drawn_out += draw_node_text(layer, world, parent_op);
+    for (const oa::render::SceneNode* c : node.children)
+        draw_node(sc, *c, world, parent_op, p.clip, drawn_out);
+    const FRect full{0, 0, float(stage_w_), float(stage_h_)};
+    const auto& cm = p.color_multiply;
+    if (cm[0] != 1.0 || cm[1] != 1.0 || cm[2] != 1.0) {
+        // premultiplied rgb * cm (dst rgb *= src rgb, dst alpha kept)
+        backend_->set_draw_blend(BlendMode::Mod);
+        backend_->set_draw_color(alpha_byte(cm[0]), alpha_byte(cm[1]),
+                                 alpha_byte(cm[2]), 255);
+        backend_->fill_rect(full);
+    }
+    if (mask_tex) {
+        // dst *= maskA, stretched over the stage like the CPU sampler
+        backend_->set_texture_blend(mask_tex, BlendMode::MaskMultiply);
+        backend_->set_texture_alpha_mod(mask_tex, 255);
+        backend_->set_texture_color_mod(mask_tex, 255, 255, 255);
+        backend_->draw_texture(mask_tex, nullptr, &full);
+        backend_->set_texture_blend(mask_tex, BlendMode::Blend);
+    }
+    backend_->set_draw_blend(BlendMode::Blend);
+    end_offscreen_pass(saved_target, had_clip, old_clip);
+    group_tex_cache[layer.id] = group_tex;
+    gpu_group_bakes_.insert(group_tex);
+    composite_group_bake(group_tex, p, had_clip, old_clip);
+    return true;
 }
 
 void RenderEngine::draw_node(const oa::render::Compositor& sc,
@@ -1520,9 +1601,18 @@ void RenderEngine::render_beigin()
 void RenderEngine::render_clear_tex_cache()
 {
     if (!backend_) return;
-    for (auto& [k, t] : group_tex_cache)
-        if (t) backend_->destroy_texture(t);
+    // GPU bakes are stage targets of one size: keep a few for the next
+    // frame's re-bake instead of allocating fresh ones every frame.
+    constexpr size_t kGroupTargetPoolMax = 8;
+    for (auto& [k, t] : group_tex_cache) {
+        if (!t) continue;
+        if (gpu_group_bakes_.count(t) && group_target_pool_.size() < kGroupTargetPoolMax)
+            group_target_pool_.push_back(t);
+        else
+            backend_->destroy_texture(t);
+    }
     group_tex_cache.clear();
+    gpu_group_bakes_.clear();
     // anchor-frame bounds are scene-dependent — they must
     // re-resolve whenever group bakes are invalidated (scene/text/anime/
     // fade/video changed).

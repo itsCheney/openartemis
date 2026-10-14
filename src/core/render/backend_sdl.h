@@ -13,6 +13,7 @@
 // SDL_Window 做法；SDL_render.h 里的同名 typedef 指向同一类型，重定义合法）。
 typedef struct SDL_Renderer SDL_Renderer;
 typedef struct SDL_Texture SDL_Texture;
+typedef struct SDL_FRect SDL_FRect;
 
 namespace oa::render {
 
@@ -20,6 +21,10 @@ namespace oa::render {
 struct SdlTexture : Texture {
     explicit SdlTexture(SDL_Texture* t) : tex(t) {}
     SDL_Texture* tex = nullptr;
+    // Stage-coordinate size and pixel scale (StageTarget under a stage scale).
+    int w = 0;
+    int h = 0;
+    float scale = 1.0f;
 };
 
 class SdlRenderBackend : public RenderBackend {
@@ -28,6 +33,7 @@ public:
 
     bool create(SDL_Window* window, int stage_w, int stage_h,
                 BackendInfo* info) override;
+    float set_stage_scale(float scale) override;
     void shutdown() override;
     const char* last_error() override;
 
@@ -67,11 +73,14 @@ public:
 
 private:
     SDL_Renderer* renderer_ = nullptr;
+    float stage_scale_ = 1.0f;
     /// SDL_Texture* → 包装对象（current_target 需要把 SDL 原始指针还原成
     /// 引擎持有的 TextureRef 同一身份，比较/恢复 target 才成立）。
     std::unordered_map<SDL_Texture*, SdlTexture*> registry_;
     SDL_Texture* sdl_tex(TextureRef t) const;
     SdlTexture* wrap(SDL_Texture* raw) const;
+    // A source rect in stage units, in the texture's pixels.
+    SDL_FRect source_rect(TextureRef t, const FRect& src) const;
 };
 
 } // namespace oa::render

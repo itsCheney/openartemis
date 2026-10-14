@@ -402,13 +402,13 @@ FontSystem::CachedGlyph FontSystem::glyph_slot(oa::render::RenderBackend* backen
     CachedGlyph none;
     if (!face || !backend) return none;
     char keybuf[96];
-    std::snprintf(keybuf, sizeof(keybuf), "%p\t%d\t%u", (void*)face,
-        raster_ppem(face, size), cp);
+    const double k = raster_scale_;
+    const int ppem = std::max(1, (int)std::lround(raster_ppem(face, size) * k));
+    std::snprintf(keybuf, sizeof(keybuf), "%p\t%d\t%u", (void*)face, ppem, cp);
     const std::string key = keybuf;
     const auto it = glyph_cache.find(key);
     if (it != glyph_cache.end()) return it->second;
     CachedGlyph cg;
-    const int ppem = raster_ppem(face, size);
     if (FT_Set_Pixel_Sizes(face, 0, (FT_UInt)ppem) == 0 &&
         FT_Load_Char(face, (FT_ULong)cp, FT_LOAD_RENDER) == 0) {
         FT_Bitmap& bm = face->glyph->bitmap;
@@ -430,8 +430,10 @@ FontSystem::CachedGlyph FontSystem::glyph_slot(oa::render::RenderBackend* backen
                 backend->update_texture(cg.tex, rgba.data(), (int)bm.width * 4);
                 backend->set_texture_blend(cg.tex, oa::render::BlendMode::Blend);
             }
-            cg.bitmap_left = face->glyph->bitmap_left;
-            cg.bitmap_top = face->glyph->bitmap_top;
+            cg.bitmap_left = face->glyph->bitmap_left / k;
+            cg.bitmap_top = face->glyph->bitmap_top / k;
+            cg.width = bm.width / k;
+            cg.height = bm.rows / k;
         }
     }
     glyph_cache[key] = cg; // 缺字形/栅格失败 → 空槽占位（不再重试）
@@ -444,7 +446,9 @@ FontSystem::CachedGlyph FontSystem::edge_slot(oa::render::RenderBackend* backend
 {
     CachedGlyph none;
     if (!face || !backend || width_px < 1.0) return none;
-    const int ppem = raster_ppem(face, size);
+    const double k = raster_scale_;
+    const int ppem = std::max(1, (int)std::lround(raster_ppem(face, size) * k));
+    width_px *= k;
     const EdgeEncoding enc = edge_encoding_from_env();
     char keybuf[128];
     std::snprintf(keybuf, sizeof(keybuf), "%p\t%d\t%u\t%.2f\t%d", (void*)face, ppem,
@@ -470,8 +474,10 @@ FontSystem::CachedGlyph FontSystem::edge_slot(oa::render::RenderBackend* backend
             backend->update_texture(cg.tex, rgba.data(), eb.width * 4);
             backend->set_texture_blend(cg.tex, oa::render::BlendMode::Blend);
         }
-        cg.bitmap_left = eb.left;
-        cg.bitmap_top = eb.top;
+        cg.bitmap_left = eb.left / k;
+        cg.bitmap_top = eb.top / k;
+        cg.width = eb.width / k;
+        cg.height = eb.height / k;
     }
     edge_cache[key] = cg;
     return cg;
@@ -572,10 +578,10 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
     };
     // 画一个字形贴图：本地左上角 (lx,ly)、尺寸取贴图实际宽高；
     // alpha = 请求 alpha × 链不透明度（近似 cmd.opacity *= opacity）。
-    auto draw_glyph_tex = [&](oa::render::TextureRef tex, double lx, double ly,
+    auto draw_glyph_tex = [&](const CachedGlyph& glyph, double lx, double ly,
         const oa::render::Rgba& col, double alpha) {
-            float wf = 0, hf = 0;
-            backend->texture_size(tex, &wf, &hf);
+            oa::render::TextureRef tex = glyph.tex;
+            const float wf = float(glyph.width), hf = float(glyph.height);
             backend->set_texture_color_mod(tex, col.r, col.g, col.b);
             const int am = int(alpha * opacity + 0.5);
             backend->set_texture_alpha_mod(
@@ -648,7 +654,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
         // 偏移 +sd；平移路径下两者严格等价，仿射路径下相差旋转/缩放的 ~1px 级，
         // 记录为近似）。
         auto emit_pass = [&](double offx, double offy, const oa::render::Rgba& pc, double pa) {
-            draw_glyph_tex(cg.tex, lx + offx, ly + offy, pc, pa);
+            draw_glyph_tex(cg, lx + offx, ly + offy, pc, pa);
         };
         if (has_shadow) {
             // 数值键 = 偏移 px；纯 style 词路径保留既有 2px。
@@ -671,7 +677,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
                     const double ex = ml.left + g.x + double(eg.bitmap_left);
                     const double ey = line_content_top + double(g.line) * line_h +
                         gm.ascent - double(eg.bitmap_top);
-                    draw_glyph_tex(eg.tex, ex, ey, outline, 255);
+                    draw_glyph_tex(eg, ex, ey, outline, 255);
                 }
             }
         }
@@ -730,7 +736,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
             }
             const double lx = x_cursor + double(cg.bitmap_left);
             const double ly = ruby_line_top + (gm.ascent - double(cg.bitmap_top));
-            draw_glyph_tex(cg.tex, lx, ly, col, 255);
+            draw_glyph_tex(cg, lx, ly, col, 255);
             x_cursor += gm.advance + ruby_kerning;
             ++drawn;
         }

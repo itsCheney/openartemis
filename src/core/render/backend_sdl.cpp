@@ -3,6 +3,7 @@
 #include <SDL3/SDL.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -27,6 +28,20 @@ SDL_BlendMode to_sdl_blend(BlendMode m) {
                 SDL_BLENDOPERATION_ADD,           // color: dst kept
                 SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO,
                 SDL_BLENDOPERATION_ADD);          // alpha: dstA *= srcA
+        case BlendMode::PremultBlend: return SDL_BLENDMODE_BLEND_PREMULTIPLIED;
+        case BlendMode::PremultAdd: return SDL_BLENDMODE_ADD_PREMULTIPLIED;
+        case BlendMode::PremultMul:
+            return SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_DST_COLOR, SDL_BLENDFACTOR_ONE_MINUS_SRC_ALPHA,
+                SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_ONE,
+                SDL_BLENDOPERATION_ADD);
+        case BlendMode::MaskMultiply:
+            return SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA,
+                SDL_BLENDOPERATION_ADD,
+                SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA,
+                SDL_BLENDOPERATION_ADD);
         case BlendMode::Blend: break; // fallthrough to default
     }
     return SDL_BLENDMODE_BLEND;
@@ -35,7 +50,8 @@ SDL_BlendMode to_sdl_blend(BlendMode m) {
 SDL_TextureAccess to_sdl_access(TextureAccess a) {
     switch (a) {
         case TextureAccess::Streaming: return SDL_TEXTUREACCESS_STREAMING;
-        case TextureAccess::Target: return SDL_TEXTUREACCESS_TARGET;
+        case TextureAccess::Target:
+        case TextureAccess::StageTarget: return SDL_TEXTUREACCESS_TARGET;
         case TextureAccess::Static: break;
     }
     return SDL_TEXTUREACCESS_STATIC;
@@ -44,8 +60,10 @@ SDL_TextureAccess to_sdl_access(TextureAccess a) {
 /// Shared ReadPixels→RGBA32 copy（当前渲染 target → 紧排行 RGBA 向量）。
 /// 行 pitch 总是处理；语义 = snapshot 面与 frame_luma/read_target_pixels
 /// 各自内联的同一段代码。
+/// A scaled stage target reads back at its stage size (logical_w/h > 0).
 bool read_current_target(SDL_Renderer* renderer, int* out_w, int* out_h,
-                         std::vector<uint8_t>* out) {
+                         std::vector<uint8_t>* out, int logical_w = 0,
+                         int logical_h = 0) {
     if (!renderer) return false;
     SDL_Surface* snap = SDL_RenderReadPixels(renderer, nullptr);
     if (!snap) return false;
@@ -54,6 +72,14 @@ bool read_current_target(SDL_Renderer* renderer, int* out_w, int* out_h,
         needs_convert ? SDL_ConvertSurface(snap, SDL_PIXELFORMAT_RGBA32) : snap;
     if (needs_convert) SDL_DestroySurface(snap);
     if (!rgba) return false;
+    if (logical_w > 0 && logical_h > 0 &&
+        (rgba->w != logical_w || rgba->h != logical_h)) {
+        SDL_Surface* scaled =
+            SDL_ScaleSurface(rgba, logical_w, logical_h, SDL_SCALEMODE_LINEAR);
+        SDL_DestroySurface(rgba);
+        if (!scaled) return false;
+        rgba = scaled;
+    }
     *out_w = rgba->w;
     *out_h = rgba->h;
     out->resize(size_t(rgba->w) * size_t(rgba->h) * 4);
@@ -182,11 +208,16 @@ void SdlRenderBackend::fill_rect(const FRect& dst)
     SDL_RenderFillRect(renderer_, &r);
 }
 
+SDL_FRect SdlRenderBackend::source_rect(TextureRef t, const FRect& src) const
+{
+    const float k = t ? static_cast<SdlTexture*>(t)->scale : 1.0f;
+    return SDL_FRect{src.x * k, src.y * k, src.w * k, src.h * k};
+}
+
 void SdlRenderBackend::draw_texture(TextureRef t, const FRect* src,
                                     const FRect* dst)
 {
-    const SDL_FRect s_sdl = src ? SDL_FRect{src->x, src->y, src->w, src->h}
-                                : SDL_FRect{0, 0, 0, 0};
+    const SDL_FRect s_sdl = src ? source_rect(t, *src) : SDL_FRect{0, 0, 0, 0};
     const SDL_FRect d_sdl = dst ? SDL_FRect{dst->x, dst->y, dst->w, dst->h}
                                 : SDL_FRect{0, 0, 0, 0};
     SDL_RenderTexture(renderer_, sdl_tex(t), src ? &s_sdl : nullptr,
@@ -197,8 +228,7 @@ void SdlRenderBackend::draw_texture_affine(TextureRef t, const FRect* src,
                                            const FPoint& o, const FPoint& r,
                                            const FPoint& d)
 {
-    const SDL_FRect s_sdl = src ? SDL_FRect{src->x, src->y, src->w, src->h}
-                                : SDL_FRect{0, 0, 0, 0};
+    const SDL_FRect s_sdl = src ? source_rect(t, *src) : SDL_FRect{0, 0, 0, 0};
     const SDL_FPoint sdl_o{o.x, o.y}, sdl_r{r.x, r.y}, sdl_d{d.x, d.y};
     SDL_RenderTextureAffine(renderer_, sdl_tex(t), src ? &s_sdl : nullptr,
                             &sdl_o, &sdl_r, &sdl_d);
@@ -228,12 +258,32 @@ void SdlRenderBackend::present()
     SDL_RenderPresent(renderer_);
 }
 
+float SdlRenderBackend::set_stage_scale(float scale)
+{
+    stage_scale_ = scale > 1.0f ? scale : 1.0f;
+    return stage_scale_;
+}
+
 TextureRef SdlRenderBackend::create_texture(int w, int h, TextureAccess access)
 {
+    const bool scaled = access == TextureAccess::StageTarget && stage_scale_ > 1.0f;
+    const int pw = scaled ? int(std::lround(w * stage_scale_)) : w;
+    const int ph = scaled ? int(std::lround(h * stage_scale_)) : h;
     SDL_Texture* tex = SDL_CreateTexture(renderer_, SDL_PIXELFORMAT_RGBA32,
-                                         to_sdl_access(access), w, h);
+                                         to_sdl_access(access), pw, ph);
     if (!tex) return nullptr;
     SdlTexture* wrap_tex = new SdlTexture(tex);
+    wrap_tex->w = w;
+    wrap_tex->h = h;
+    if (scaled) {
+        // Each SDL render target keeps its own scale: set it once, and
+        // every draw, clip and fill into this target stays in stage units.
+        wrap_tex->scale = float(pw) / float(w);
+        SDL_Texture* prev = SDL_GetRenderTarget(renderer_);
+        SDL_SetRenderTarget(renderer_, tex);
+        SDL_SetRenderScale(renderer_, float(pw) / float(w), float(ph) / float(h));
+        SDL_SetRenderTarget(renderer_, prev);
+    }
     registry_[tex] = wrap_tex;
     return wrap_tex;
 }
@@ -270,6 +320,12 @@ void SdlRenderBackend::unlock_texture(TextureRef t)
 
 bool SdlRenderBackend::texture_size(TextureRef t, float* w, float* h)
 {
+    if (t && static_cast<SdlTexture*>(t)->scale != 1.0f) {
+        const SdlTexture* st = static_cast<SdlTexture*>(t);
+        if (w) *w = float(st->w);
+        if (h) *h = float(st->h);
+        return true;
+    }
     return SDL_GetTextureSize(sdl_tex(t), w, h);
 }
 
@@ -291,6 +347,9 @@ void SdlRenderBackend::set_texture_color_mod(TextureRef t, uint8_t r, uint8_t g,
 
 bool SdlRenderBackend::read_target(int* w, int* h, std::vector<uint8_t>* rgba)
 {
+    const SdlTexture* cur = wrap(SDL_GetRenderTarget(renderer_));
+    if (cur && cur->scale != 1.0f)
+        return read_current_target(renderer_, w, h, rgba, cur->w, cur->h);
     return read_current_target(renderer_, w, h, rgba);
 }
 

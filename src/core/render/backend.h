@@ -64,11 +64,22 @@ struct RgbaF {
 /// 引擎实际使用的混合语义子集（layermode: add/additive、screen≈blend、
 /// multiply→mod；其余一律 blend；NONE 仅离屏清屏用）。
 enum class BlendMode { None, Blend, Add, Mod,
-                       AlphaMultiply }; // dstA *= srcA, dstRGB kept (stencil mask)
+                       AlphaMultiply, // dstA *= srcA, dstRGB kept (stencil mask)
+                       // Premultiplied-alpha sources (GPU group bakes):
+                       PremultBlend, // dst = src + dst*(1-srcA)
+                       PremultAdd,   // dstRGB += srcRGB, dstA kept
+                       PremultMul,   // dstRGB = srcRGB*dstRGB + dstRGB*(1-srcA), dstA kept
+                       MaskMultiply }; // dst *= srcA (rgb and alpha; premultiplied mask)
 
 /// 纹理创建方式（与引擎三种用法一一对应：静态贴图/流式逐帧刷新/离屏
 /// target）。
-enum class TextureAccess { Static, Streaming, Target };
+///
+/// StageTarget is a render target addressed in stage coordinates. Backends
+/// that support a stage scale (set_stage_scale) allocate it at the scaled
+/// pixel size and render into it at that scale, so a 1280x720 stage can be
+/// drawn at 1920x1080. Sizes, source rects, clips and read-backs stay in
+/// stage coordinates.
+enum class TextureAccess { Static, Streaming, Target, StageTarget };
 
 /// 几何绘制顶点（SDL_Vertex 字段集等价；字段顺序不同，映射在 sdl 实现）。
 struct Vertex {
@@ -104,6 +115,12 @@ public:
     /// 失败返回 false（last_error() 有详情）。成功填充 info。
     virtual bool create(SDL_Window* window, int stage_w, int stage_h,
                         BackendInfo* info) = 0;
+    /// Pixel scale for StageTarget textures created from now on. Returns
+    /// the scale the backend applies (1 when it does not support one).
+    virtual float set_stage_scale(float scale) {
+        (void)scale;
+        return 1.0f;
+    }
     /// 销毁渲染器（宿主要求的顺序点：先毁纹理、后毁渲染器）。
     virtual void shutdown() = 0;
     /// 最近一次失败的可打印原因（SDL_GetError 语义；无失败时可为空串）。
