@@ -7,7 +7,8 @@
 #include <cassert>
 #include <cctype>
 #include <cerrno>
-#include <charconv> // §8: format_tween_param 的 std::to_chars
+#include <charconv>
+#include "core/util/shortest_double.h" // §8: format_tween_param
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -2114,10 +2115,7 @@ std::string format_tween_param(std::string_view param, double value) {
         if (param == k) return std::to_string((int64_t)std::llround(value));
     }
     // shortest numeric string like Rust f32::to_string for the rest
-    char buf[64];
-    auto res = std::to_chars(buf, buf + sizeof(buf), value);
-    if (res.ec == std::errc()) return std::string(buf, res.ptr);
-    return std::to_string(value);
+    return oa::util::shortest_double(value);
 }
 
 

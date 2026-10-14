@@ -20,6 +20,7 @@
 // callers. Keep it that way: "small interface, big file".
 // ===========================================================================
 #include "core/runtime/runtime_iet.h"
+#include "core/util/shortest_double.h"
 
 #include <algorithm>
 #include <array>
@@ -131,15 +132,9 @@ std::string Value::to_display() const {
         case ValueKind::Float: {
             // Shortest round-trip repr without exponent for typical ranges
             // (float display formatting; engine-internal consistent).
-            char buf[64];
-            auto res = std::to_chars(buf, buf + sizeof(buf), float_val);
-            if (res.ec == std::errc()) {
-                std::string s(buf, res.ptr);
-                // Rust never prints "+"; to_chars prints integers w/o trailing
-                // ".0" already under default (shortest) format.
-                return s;
-            }
-            return std::to_string(float_val);
+            // Rust never prints "+"; the shortest format prints integers
+            // without a trailing ".0" already.
+            return oa::util::shortest_double(float_val);
         }
         default:
             return to_string();

@@ -1446,6 +1446,10 @@ uint64_t MediaPlayers::device_callbacks() const {
     return sink_ ? sink_->device_callbacks() : 0;
 }
 
+void MediaPlayers::set_output_paused(bool paused) {
+    if (sink_) sink_->set_paused(paused);
+}
+
 void MediaPlayers::flush_video_audio() {
     // The negative control (OA_AUDIO_NO_BOUND / set_audio_bound_enabled(false))
     // restores the whole legacy behaviour: unbounded push AND the

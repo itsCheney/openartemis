@@ -48,6 +48,9 @@ struct Options {
     std::string platform = "android";
 #elif defined(__EMSCRIPTEN__)
     std::string platform = "wasm";
+#elif defined(SDL_PLATFORM_IOS)
+    // iOS boots whichever section the game ships (main.cpp pick_platform).
+    std::string platform = "auto";
 #else
     std::string platform = "windows";
 #endif
@@ -56,6 +59,9 @@ struct Options {
     // GLES renderer with the same semantics). --renderer NAME or the
     // OA_RENDERER env var; ignored by --headless (no window, no renderer).
     std::string renderer = "sdl";
+    // --save-root PATH: where saves go; empty = OA_SAVE_ROOT / platform
+    // default (main.cpp host_save_root).
+    std::string save_root;
 };
 
 // Host run state: created in SDL_AppInit, driven by SDL_AppIterate; the
@@ -97,6 +103,13 @@ struct AppState
     // since the last frame — the static-frame skip must repaint once at the
     // new window size (the letterbox presentation is window-driven).
     bool force_repaint = false;
+    // static-frame skip bookkeeping (SDL_AppIterate): previous frame's
+    // runtime counters, and whether anything was presented yet.
+    uint64_t prev_layer_ev = 0, prev_tween_ev = 0;
+    uint64_t prev_tween_calls = 0, prev_pointer = 0;
+    uint64_t prev_text_rev = 0;
+    bool prev_animated = false;
+    bool rendered_any = false;
 #if OA_TEST_BUILD
     // title-button probe state (windowed; resolved once the title UI
     // registers, see probe block below).

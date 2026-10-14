@@ -282,6 +282,11 @@ public:
     /// sink (headless) drops them silently.
     void push_video_audio(const float* interleaved_stereo, size_t frames);
 
+    /// Pause or resume the output device (no-op without one). Used by an
+    /// embedding host while the app is in the background; queued audio
+    /// stays put and plays on from where it stopped.
+    void set_output_paused(bool paused);
+
     /// dump the OA_AUDIO_DIAG delivery summary (no-op when the
     /// diagnostics never ran). `label` names the dump in the output.
     void print_audio_diag(const char* label) const;

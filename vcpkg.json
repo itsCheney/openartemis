@@ -4,7 +4,10 @@
   "description": "C++/SDL3 independent Artemis visual-novel engine runtime",
   "builtin-baseline": "8e8dfb4ba483886936ded5ca201b500b8d8b0096",
   "dependencies": [
-    "sdl3",
+    {
+      "name": "sdl3",
+      "platform": "!ios"
+    },
     "freetype",
     "libjpeg-turbo",
     "libpng",
@@ -14,7 +17,7 @@
       "name": "ffmpeg",
       "default-features": false,
       "features": [ "avcodec", "avformat" ],
-      "platform": "!wasm32"
+      "platform": "!wasm32 & !ios"
     },
     "physfs"
   ],

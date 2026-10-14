@@ -19,6 +19,9 @@ endif()
 option(OA_BUILD_TOOLS "Build bundled command-line tools" ON)
 option(OA_ENABLE_TESTS "Build unit tests" ON)
 option(OA_ENABLE_ASAN "Build with AddressSanitizer (diagnostic builds only)" OFF)
+# iOS only: build ArtemisRuntime.framework for the Mikage app (src/mikage)
+# instead of the standalone host. See src/mikage/README.md.
+option(OA_MIKAGE_RUNTIME "Build ArtemisRuntime.framework for Mikage (iOS)" OFF)
 
 # ---------------------------------------------------------------------------
 # Global settings
@@ -64,7 +67,47 @@ endif()
 # ---------------------------------------------------------------------------
 # Dependencies (vcpkg; toolchain provided on the command line / presets)
 # ---------------------------------------------------------------------------
-find_package(SDL3 CONFIG REQUIRED)
+if(OA_MIKAGE_RUNTIME)
+  if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+    message(FATAL_ERROR "OA_MIKAGE_RUNTIME builds an iOS framework; configure with -DCMAKE_SYSTEM_NAME=iOS")
+  endif()
+  enable_language(OBJC OBJCXX)
+  # Mikage embeds one SDL3.framework that every engine links, so SDL is not
+  # taken from vcpkg here. Its headers are exposed as <SDL3/...>.
+  set(OA_SDL3_FRAMEWORK "" CACHE PATH "The SDL3.framework Mikage embeds (for this SDK)")
+  if(NOT EXISTS "${OA_SDL3_FRAMEWORK}/Headers/SDL.h")
+    message(FATAL_ERROR "OA_SDL3_FRAMEWORK is not an SDL3.framework: '${OA_SDL3_FRAMEWORK}'")
+  endif()
+  set(OA_SDL3_INCLUDE "${CMAKE_CURRENT_BINARY_DIR}/sdl3-include")
+  file(MAKE_DIRECTORY "${OA_SDL3_INCLUDE}")
+  file(CREATE_LINK "${OA_SDL3_FRAMEWORK}/Headers" "${OA_SDL3_INCLUDE}/SDL3" SYMBOLIC)
+  add_library(SDL3::SDL3 INTERFACE IMPORTED)
+  set_target_properties(SDL3::SDL3 PROPERTIES
+    INTERFACE_INCLUDE_DIRECTORIES "${OA_SDL3_INCLUDE}"
+    INTERFACE_LINK_LIBRARIES "${OA_SDL3_FRAMEWORK}")
+  # Movies decode with the FFmpeg Mikage already builds for KiriKiri (static
+  # libraries under one prefix), so vcpkg.json leaves it out on iOS.
+  set(OA_FFMPEG_ROOT "" CACHE PATH "Prefix with FFmpeg's headers and static libraries for this SDK")
+  if(NOT EXISTS "${OA_FFMPEG_ROOT}/include/libavformat/avformat.h")
+    message(FATAL_ERROR "OA_FFMPEG_ROOT has no FFmpeg headers: '${OA_FFMPEG_ROOT}'")
+  endif()
+  set(FFMPEG_FOUND TRUE)
+  set(FFMPEG_INCLUDE_DIRS "${OA_FFMPEG_ROOT}/include")
+  set(FFMPEG_LIBRARY_DIRS "${OA_FFMPEG_ROOT}/lib")
+  set(FFMPEG_LIBRARIES)
+  foreach(name avformat avcodec swresample swscale avutil)
+    if(EXISTS "${OA_FFMPEG_ROOT}/lib/lib${name}.a")
+      list(APPEND FFMPEG_LIBRARIES "${OA_FFMPEG_ROOT}/lib/lib${name}.a")
+    elseif(name MATCHES "^av")
+      message(FATAL_ERROR "FFmpeg library missing: ${OA_FFMPEG_ROOT}/lib/lib${name}.a")
+    endif()
+  endforeach()
+  list(APPEND FFMPEG_LIBRARIES bz2 z iconv
+    "-framework AudioToolbox" "-framework CoreFoundation" "-framework CoreMedia"
+    "-framework CoreVideo" "-framework VideoToolbox" "-framework Security")
+else()
+  find_package(SDL3 CONFIG REQUIRED)
+endif()
 
 # ---------------------------------------------------------------------------
 # Real-asset tests: point OA_TEST_FPM_PFS at fpm/root.pfs. No machine-specific
@@ -130,15 +173,19 @@ endif()
 # Targets
 # ---------------------------------------------------------------------------
 add_subdirectory(src/core)
-add_subdirectory(src/app)
+if(OA_MIKAGE_RUNTIME)
+  add_subdirectory(src/mikage)
+else()
+  add_subdirectory(src/app)
+endif()
 # tools/ (opfs / psb / asb / oasave + helper scripts) and tests/ are desktop
 # host artifacts (POSIX process + real argv + window drives): the Android
 # (Gradle/SDLActivity) and Emscripten (browser) shells build the plain user
 # host only (research/74 §wasm/§android).
-if(OA_BUILD_TOOLS AND NOT ANDROID AND NOT EMSCRIPTEN)
+if(OA_BUILD_TOOLS AND NOT ANDROID AND NOT EMSCRIPTEN AND NOT OA_MIKAGE_RUNTIME)
   add_subdirectory(tools)
 endif()
-if(OA_ENABLE_TESTS AND NOT ANDROID AND NOT EMSCRIPTEN)
+if(OA_ENABLE_TESTS AND NOT ANDROID AND NOT EMSCRIPTEN AND NOT OA_MIKAGE_RUNTIME)
   enable_testing()
   add_subdirectory(tests)
 endif()

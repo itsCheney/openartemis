@@ -1,15 +1,26 @@
 // openartemis — SDL3 host (M5b integration): boots GameRuntime on a real PFS
 // project, ticks with SDL input, and renders the Lua-driven layer events
 // through oa::render::Compositor (textures resolved via magic paths + .png).
+#ifndef OA_HOST_LIBRARY
+#define OA_HOST_LIBRARY 0
+#endif
+#if OA_HOST_LIBRARY
+// Embedded in a host app (src/mikage: Mikage's ArtemisRuntime.framework).
+// The host drives the four callbacks itself, so SDL must not supply main().
+#define SDL_MAIN_HANDLED
+#endif
 #define SDL_MAIN_USE_CALLBACKS
 #include <SDL3/SDL_main.h>
 #include <SDL3/SDL_timer.h>
 #include <SDL3/SDL_log.h>
 #include <SDL3/SDL_mouse.h>
 #include <SDL3/SDL_hints.h>
+#include <SDL3/SDL_properties.h>
+#include <SDL3/SDL_video.h>
 #include <algorithm>
 #include <filesystem>
 #include <array>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -139,6 +150,8 @@ void print_usage(const char* argv0) {
         "                       --headless never creates a renderer.\n"
         "  --dump PATH          At end-of-run (windowed --frames), also write the final\n"
         "                       rendered frame as a PPM to PATH.\n"
+        "  --save-root PATH     Write saves under PATH (wins over OA_SAVE_ROOT and the\n"
+        "                       platform default).\n"
         "  -h, --help           Show this help and exit.\n"
         "\n"
         "env:\n"
@@ -215,6 +228,10 @@ int parse_args(int argc, char** argv, Options& o) {
             if (!value_of(v) || v.empty()) return usage_error("--dump needs a file path");
             o.dump = v;
             o.dump_on_end = true;
+        } else if (name == "--save-root") {
+            std::string v;
+            if (!value_of(v) || v.empty()) return usage_error("--save-root needs a directory");
+            o.save_root = v;
         } else if (a == "--headless") {
             o.headless = true;
         } else if (!a.empty() && a[0] == '-' && a != "-") {
@@ -384,6 +401,26 @@ static std::string host_save_root(const std::string& pfs_path, bool is_dir) {
     return save_root;
 }
 
+// --platform auto (the iOS default): the first section system.ini has, in
+// the order the engine is best verified on. Phone releases carry [ANDROID]
+// (and sometimes [IOS]); PC releases often only [WINDOWS].
+static std::string pick_platform(const oa::fs::IFileSystem& fs) {
+    static const char* const kOrder[] = {"android", "ios", "windows"};
+    if (const auto bytes = fs.read("system.ini")) {
+        std::string text(bytes->begin(), bytes->end());
+        for (char& c : text) c = char(std::toupper((unsigned char)c));
+        for (const char* name : kOrder) {
+            std::string mark = "[";
+            for (const char* c = name; *c; ++c) mark += char(std::toupper((unsigned char)*c));
+            mark += "]";
+            if (text.find(mark) != std::string::npos) return name;
+        }
+    }
+    return "windows";
+}
+
+namespace { void touch_reset(); }
+
 SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 {
     // the SDL3 main-callback driver runs event-gated when the
@@ -401,6 +438,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 
     // 创建app
     AppState* state = new AppState();
+    // A host may run several games in one process: no gesture survives.
+    touch_reset();
     *appstate = state;
 
     const int parsed = parse_args(argc, argv, state->opt);
@@ -459,6 +498,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "cannot open project source: %s\n", e.what());
+        SDL_SetError("cannot open project source: %s", e.what());
         return SDL_APP_FAILURE;
     }
     state->rt = std::move(std::make_unique<oa::runtime::GameRuntime>(fs));
@@ -472,7 +512,9 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     // there). Tests and harness runs MUST pass OA_SAVE_ROOT=<tmp> and never
     // write into the game directory (assets are read-only).
     {
-        const std::string save_root = host_save_root(pfs_path, is_dir);
+        const std::string save_root = state->opt.save_root.empty()
+            ? host_save_root(pfs_path, is_dir)
+            : state->opt.save_root;
         auto store = std::make_shared<oa::runtime::DirSaveStore>(save_root);
         std::error_code sec;
         std::filesystem::create_directories(std::filesystem::path(save_root), sec);
@@ -481,11 +523,14 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
                     "OA_SAVE_ROOT)\n",
                     std::filesystem::absolute(save_root).string().c_str());
     }
+    if (state->opt.platform == "auto")
+        state->opt.platform = pick_platform(*fs);
     try {
         state->rt->open_project(state->opt.platform);
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "project open failed: %s\n", e.what());
+        SDL_SetError("project open failed: %s", e.what());
         return SDL_APP_FAILURE;
     }
     state->rt->interpreter().on_step = [=](const std::string&, size_t, const oa::runtime::Instruction& i) {
@@ -507,6 +552,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     }
     catch (const std::exception& e) {
         std::fprintf(stderr, "project boot failed: %s\n", e.what());
+        SDL_SetError("project boot failed: %s", e.what());
         return SDL_APP_FAILURE;
     }
     std::printf("[app] project booted; %s\n",
@@ -675,7 +721,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     // creation flag — Android_CreateWindow never touches the window style; only
     // Android_SetWindowFullscreen does. So this flag alone decides nothing on
     // Android; the style is applied by the SDL_SetWindowFullscreen call below.
-#if defined(__ANDROID__) || defined(__EMSCRIPTEN__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(__EMSCRIPTEN__) || defined(SDL_PLATFORM_IOS)
     win_flags = (win_flags | SDL_WINDOW_FULLSCREEN) & ~SDL_WINDOW_RESIZABLE;
 #endif
     // GLES line: the window must carry SDL_WINDOW_OPENGL so the
@@ -739,7 +785,18 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     if (const char* v = std::getenv("OA_WIN_H"); v && *v && std::atoi(v) > 0)
         stage_h = std::atoi(v);
 #endif
-    state->window = SDL_CreateWindow("openartemis", stage_w, stage_h, win_flags);
+    {
+        const SDL_PropertiesID props = SDL_CreateProperties();
+        SDL_SetStringProperty(props, SDL_PROP_WINDOW_CREATE_TITLE_STRING, "openartemis");
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_WIDTH_NUMBER, stage_w);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_HEIGHT_NUMBER, stage_h);
+        SDL_SetNumberProperty(props, SDL_PROP_WINDOW_CREATE_FLAGS_NUMBER, win_flags);
+        // Embedding hosts may need extra creation properties (iOS: the
+        // UIWindowScene the window joins).
+        oa::plat::configure_window(props);
+        state->window = SDL_CreateWindowWithProperties(props);
+        SDL_DestroyProperties(props);
+    }
     if (!state->window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return SDL_APP_FAILURE;
@@ -755,7 +812,7 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
     // OA_ANDROID_FULLSCREEN=0 turns it off (A/B switch: it is the newest thing
     // on this path, so it must be possible to rule it out from the device
     // without a rebuild).
-#if defined(__ANDROID__) || defined(__EMSCRIPTEN__) || defined(__IPHONEOS__)
+#if defined(__ANDROID__) || defined(__EMSCRIPTEN__) || defined(SDL_PLATFORM_IOS)
     bool want_fullscreen = true;
     if (const char* fs = std::getenv("OA_ANDROID_FULLSCREEN"); fs && *fs)
         want_fullscreen = std::atoi(fs) != 0;
@@ -896,6 +953,8 @@ struct TouchGestureState {
 // the gesture state must not become an external symbol.
 namespace {
 TouchGestureState g_touch;
+
+void touch_reset() { g_touch = TouchGestureState{}; }
 }  // namespace
 
 // Movement beyond this (in window pixels) separates a tap from a drag.
@@ -980,10 +1039,11 @@ void touch_handle(AppState* state, const SDL_Event* ev) {
         } else if (g_touch.fingers.size() == 2) {
             g_touch.phase = TouchPhase::MultiFinger;
         } else {
-            // Three or more fingers: not a gesture this engine maps (the
-            // reference build opens its own native menu here, which does not
-            // exist for us). Drop the gesture so lifting those fingers emits
-            // nothing at all.
+            // Three or more fingers: the engine maps no gesture here (the
+            // reference build opens its own native menu; an embedding host
+            // may do the same through oa::plat::menu_gesture). Drop the
+            // gesture so lifting those fingers emits nothing at all.
+            if (g_touch.phase != TouchPhase::Idle) oa::plat::menu_gesture();
             g_touch.phase = TouchPhase::Idle;
         }
         return;
@@ -1053,13 +1113,30 @@ SDL_AppResult SDL_AppEvent(void* appstate, SDL_Event* ev)
         state->force_repaint = true;
     }
     if (ev->type == SDL_EVENT_KEY_DOWN) {
-        if (ev->key.key == SDLK_ESCAPE)
+        if (ev->key.key == SDLK_ESCAPE) {
+#if OA_HOST_LIBRARY
+            // The host's Back button sends Escape. Artemis has no back key;
+            // the right button is its cancel/back chain (UI EXIT), so press
+            // that instead of quitting the game.
+            if (state->mouse_held.insert(2).second)
+                state->input.key_down_edges.push_back(2);
+            return SDL_APP_CONTINUE;
+#else
             return SDL_APP_SUCCESS;
+#endif
+        }
         const int vk = sdl_key_to_vk(ev->key.key);
         if (vk > 0 && state->kbd_down.insert(vk).second)
             state->input.key_down_edges.push_back(vk);
     }
     if (ev->type == SDL_EVENT_KEY_UP) {
+#if OA_HOST_LIBRARY
+        if (ev->key.key == SDLK_ESCAPE) {
+            if (state->mouse_held.erase(2) > 0)
+                state->input.key_up_edges.push_back(2);
+            return SDL_APP_CONTINUE;
+        }
+#endif
         const int vk = sdl_key_to_vk(ev->key.key);
         if (vk > 0 && state->kbd_down.erase(vk) > 0)
             state->input.key_up_edges.push_back(vk);
@@ -1377,9 +1454,13 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // dispatches may flip visuals through Lua (which lands in the counters
     // on a later tick — keep the conservative delta here too). An active
     // tween/[anime]/transition also forces per-frame redraws.
-    static uint64_t s_prev_layer_ev = 0, s_prev_tween_ev = 0;
-    static uint64_t s_prev_tween_calls = 0, s_prev_pointer = 0;
-    static uint64_t s_prev_text_rev = 0; // 文本内容版本（跳帧不吞文本）
+    // Per-session (AppState), not function statics: a host can run several
+    // games in one process.
+    uint64_t& s_prev_layer_ev = state->prev_layer_ev;
+    uint64_t& s_prev_tween_ev = state->prev_tween_ev;
+    uint64_t& s_prev_tween_calls = state->prev_tween_calls;
+    uint64_t& s_prev_pointer = state->prev_pointer;
+    uint64_t& s_prev_text_rev = state->prev_text_rev; // 文本内容版本（跳帧不吞文本）
     const bool text_changed = state->rt->text_revision() != s_prev_text_rev;
     s_prev_text_rev = state->rt->text_revision();
     // layer-model: 现状判据的四个计数项先分项成布尔
@@ -1409,7 +1490,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // their bake-time alpha).
     const double global_fade = state->rt->all_delete_fade();
     const bool fade_active = global_fade < 1.0;
-    static bool s_prev_animated = false;
+    bool& s_prev_animated = state->prev_animated;
     const bool frame_dirty =
         scene_mutated || animated_now || s_prev_animated || trans_now ||
         !drained_events.empty() || text_changed || video_active ||
@@ -1528,7 +1609,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
 
     // ---- render (static-frame skip: identical frames keep the last
     // presented image —  last_submitted_frame logic) --
-    static bool s_rendered_any = false;
+    bool& s_rendered_any = state->rendered_any;
     // window resize/expose events force one repaint at the new size.
     const bool repaint_requested = state->force_repaint;
     state->force_repaint = false;
@@ -1861,7 +1942,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // reports the failure).
     video_demo_end(state, &state->quit);
 #endif
-    if (state->opt.fps > 0) {
+    if (oa::plat::host_paces_frames()) {
+        // The embedding host steps one frame per display refresh; sleeping
+        // here would only steal that frame's budget.
+    } else if (state->opt.fps > 0) {
         // --fps N: pace each frame to ~1000/N ms of wall time (keeps the
         // real-time delta semantics, just with a target frame interval).
         const Uint64 spent = SDL_GetTicks() - frame_start;

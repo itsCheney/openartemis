@@ -26,12 +26,24 @@
 //                            rAF-stalled) never enters tick() as one giant
 //                            delta.
 //
-// One implementation TU per OS family, picked by src/app/CMakeLists.txt:
+//   configure_window()       extra SDL window-creation properties (iOS:
+//                            the UIWindowScene an embedding app hands over).
+//   menu_gesture()           a three-finger touch began (iOS: the
+//                            embedding app opens its own menu).
+//   host_paces_frames()      true when an embedding host steps one frame
+//                            per display refresh, so the host loop must
+//                            not sleep at the end of a frame.
+//
+// One implementation TU per OS family, picked by src/app/CMakeLists.txt
+// (the iOS one ships with the Mikage host in src/mikage):
 //   platform_desktop.cpp  linux + windows share it (identical semantics
 //                         today; TODO: split when a divergence appears)
 //   platform_android.cpp
 //   platform_wasm.cpp
+//   src/mikage/MikagePlatform.cpp  iOS, inside Mikage's ArtemisRuntime.framework
 #include <string>
+
+#include <SDL3/SDL_properties.h>
 
 namespace oa::plat {
 
@@ -53,5 +65,14 @@ void shutdown();
 /// True once after each OS background->foreground round trip; main-thread
 /// consumer, safe to poll every frame (atomic exchange, false otherwise).
 bool take_lifecycle_resume();
+
+/// Adds platform window-creation properties before SDL_CreateWindowWithProperties.
+void configure_window(SDL_PropertiesID props);
+
+/// A three-or-more-finger touch began (the engine itself maps no gesture).
+void menu_gesture();
+
+/// True when the embedding host paces frames (no end-of-frame sleep).
+bool host_paces_frames();
 
 } // namespace oa::plat

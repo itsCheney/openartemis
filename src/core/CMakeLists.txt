@@ -90,7 +90,11 @@ target_link_libraries(libopenartemis PUBLIC
 # media/video.cpp behind its own `#if defined(OA_HAVE_FFMPEG)` gate, so this
 # block only defines the macro and wires the libraries.
 # ---------------------------------------------------------------------------
-find_package(FFMPEG QUIET)
+# A host that brings its own FFmpeg (OA_MIKAGE_RUNTIME, top-level
+# CMakeLists) sets the FFMPEG_* variables before this point.
+if(NOT FFMPEG_FOUND)
+  find_package(FFMPEG QUIET)
+endif()
 if(FFMPEG_FOUND)
   target_compile_definitions(libopenartemis PUBLIC OA_HAVE_FFMPEG=1)
   target_include_directories(libopenartemis SYSTEM PRIVATE ${FFMPEG_INCLUDE_DIRS})

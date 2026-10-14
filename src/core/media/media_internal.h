@@ -398,6 +398,13 @@ public:
         }
     }
     bool ok() const { return device_ != 0; }
+    /// Stop or restart the device pulling the bound streams (an embedding
+    /// host suspends playback while the app is in the background).
+    void set_paused(bool paused) {
+        if (!device_) return;
+        if (paused) SDL_PauseAudioDevice(device_);
+        else SDL_ResumeAudioDevice(device_);
+    }
 
 private:
     void push_to(int source, const float* interleaved_stereo, size_t frames) {

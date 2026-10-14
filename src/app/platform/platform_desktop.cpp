@@ -47,4 +47,9 @@ bool take_lifecycle_resume() {
     return false;
 }
 
+// No window properties, menu gesture or host pacing on this platform.
+void configure_window(SDL_PropertiesID) {}
+void menu_gesture() {}
+bool host_paces_frames() { return false; }
+
 } // namespace oa::plat

@@ -1,0 +1,5 @@
+framework module ArtemisRuntime {
+    umbrella header "MikageArtemisRuntime.h"
+    export *
+    module * { export * }
+}
