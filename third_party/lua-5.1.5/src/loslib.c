@@ -36,7 +36,13 @@ static int os_pushresult (lua_State *L, int i, const char *filename) {
 
 
 static int os_execute (lua_State *L) {
+#if defined(LUA_NO_SYSTEM)
+  /* openartemis: iOS has no system(). Without a command report "no shell"
+     (0); a command fails (-1). */
+  lua_pushinteger(L, luaL_optstring(L, 1, NULL) ? -1 : 0);
+#else
   lua_pushinteger(L, system(luaL_optstring(L, 1, NULL)));
+#endif
   return 1;
 }
 

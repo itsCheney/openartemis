@@ -150,6 +150,10 @@ add_library(lua51 STATIC
 target_include_directories(lua51 PUBLIC ${LUA51_SRC_DIR})
 # Lua compiled as C (it is C code); silence third-party warnings.
 target_compile_options(lua51 PRIVATE -w)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # iOS has no system(); os.execute reports that no shell is available.
+  target_compile_definitions(lua51 PRIVATE LUA_NO_SYSTEM)
+endif()
 if(NOT MSVC)
   target_compile_options(lua51 PRIVATE -fPIC)
 endif()
