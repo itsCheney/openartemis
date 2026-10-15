@@ -918,6 +918,8 @@ bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
         float cw = 0, ch = 0;
         if (!backend_->texture_size(canvas, &cw, &ch) || int(cw) != w ||
             int(ch) != h) {
+            std::fprintf(stderr, "[emote] canvas '%s' resized %.0fx%.0f -> %dx%d\n",
+                         key.name.c_str(), cw, ch, w, h);
             textures.erase(key);
             backend_->destroy_texture(canvas);
             emote_canvas_.erase(key);
@@ -971,26 +973,51 @@ bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
             plain.push_back(&part);
     }
 
+    // Why parts were not drawn (diagnostics below).
+    int skip_ref = 0, skip_atlas = 0, skip_alpha = 0, drawn_parts = 0;
+    std::string atlas_error;
     // one part draw, translated by (ox,oy) scratch-space offset
     auto draw_part = [&](const oa::emote::EmoteDrawPart& part,
                          float ox, float oy) {
-        if (part.source < 0 || part.source >= int(file.sources.size())) return;
+        if (part.source < 0 || part.source >= int(file.sources.size())) {
+            ++skip_ref;
+            return;
+        }
         const oa::emote::EmoteSource& src = *file.sources[size_t(part.source)];
-        if (part.icon < 0 || part.icon >= int(src.icons.size())) return;
-        if (part.verts.size() < 3) return;
+        if (part.icon < 0 || part.icon >= int(src.icons.size()) ||
+            part.verts.size() < 3) {
+            ++skip_ref;
+            return;
+        }
+        if (part.alpha <= 0.0) ++skip_alpha;
         const RenderEngine::EmoteAtlasKey akey{key, part.source, file_uid};
         TextureRef atlas = nullptr;
         const auto ai = emote_atlases_.find(akey);
         if (ai != emote_atlases_.end()) atlas = ai->second;
         if (!atlas) {
             std::string err;
-            if (!file.ensure_atlas(const_cast<oa::emote::EmoteSource*>(&src), &err))
+            if (!file.ensure_atlas(const_cast<oa::emote::EmoteSource*>(&src), &err)) {
+                ++skip_atlas;
+                if (atlas_error.empty())
+                    atlas_error = "decode " + src.textureType + " " +
+                                  std::to_string(src.textureWidth) + "x" +
+                                  std::to_string(src.textureHeight) +
+                                  (err.empty() ? "" : ": " + err);
                 return;
-            if (src.rgba.empty() || src.textureWidth <= 0 || src.textureHeight <= 0)
+            }
+            if (src.rgba.empty() || src.textureWidth <= 0 || src.textureHeight <= 0) {
+                ++skip_atlas;
+                if (atlas_error.empty()) atlas_error = "empty atlas pixels";
                 return;
+            }
             atlas = backend_->create_texture(src.textureWidth, src.textureHeight,
                                              TextureAccess::Static);
-            if (!atlas) return;
+            if (!atlas) {
+                ++skip_atlas;
+                if (atlas_error.empty())
+                    atlas_error = std::string("texture: ") + backend_->last_error();
+                return;
+            }
             backend_->update_texture(atlas, src.rgba.data(),
                                      src.textureWidth * 4);
             backend_->set_texture_blend(atlas, BlendMode::Blend);
@@ -1021,6 +1048,7 @@ bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
         }
         backend_->draw_geometry(atlas, stage.data(), int(stage.size()),
                                 nullptr, 0);
+        ++drawn_parts;
     };
 
     for (const oa::emote::EmoteDrawPart* part : plain)
@@ -1089,6 +1117,23 @@ bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
         backend_->set_texture_blend(stencil_scratch_[0], BlendMode::Blend);
     }
     backend_->set_target(prev_target);
+    // One line for a figure's first draws, and for any draw that lost parts.
+    {
+        int& logged = emote_draw_logs_[key.name + '#' + std::to_string(file_uid)];
+        const bool lost = skip_ref > 0 || skip_atlas > 0;
+        if (logged < 3 || (lost && logged < 40)) {
+            ++logged;
+            std::fprintf(stderr,
+                         "[emote] draw layer='%s' file=%llu canvas=%dx%d parts=%zu "
+                         "plain=%zu stencil_groups=%zu drawn=%d zero_alpha=%d "
+                         "skipped_ref=%d skipped_atlas=%d%s%s\n",
+                         key.name.c_str(), (unsigned long long)file_uid, w, h,
+                         parts.size(), plain.size(), stencil.size(), drawn_parts,
+                         skip_alpha, skip_ref, skip_atlas,
+                         atlas_error.empty() ? "" : " atlas_error=",
+                         atlas_error.c_str());
+        }
+    }
     return true;
 }
 

@@ -24,6 +24,11 @@
 
 #include <atomic>
 #include <cctype>
+#include <cerrno>
+#include <chrono>
+#include <mutex>
+#include <thread>
+#include <unistd.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -47,6 +52,104 @@ void log(const char *source, int32_t level, const char *message)
 {
     if (auto callback = logCallback.load(std::memory_order_acquire))
         callback(source, level, message ? message : "");
+}
+
+// The engine reports through printf/fprintf (image loads, E-mote and
+// script warnings, render setup). stdout and stderr go through pipes whose
+// reader threads copy everything to the original descriptors (Xcode's
+// console) and, while a game runs, hand each line to the log callback.
+std::atomic<bool> consoleForwarding{false};
+
+void forwardConsoleLine(const char *source, int32_t level, const std::string &line)
+{
+    if (!consoleForwarding.load(std::memory_order_acquire) || line.empty())
+        return;
+    // A script printing every frame must not flood the diagnostics log.
+    constexpr int linesPerSecond = 200;
+    static std::mutex mutex;
+    static auto windowStart = std::chrono::steady_clock::now();
+    static int linesInWindow = 0;
+    static int dropped = 0;
+    std::string note;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        const auto now = std::chrono::steady_clock::now();
+        if (now - windowStart >= std::chrono::seconds(1)) {
+            if (dropped > 0)
+                note = std::to_string(dropped) + " console lines dropped (over " +
+                       std::to_string(linesPerSecond) + "/s)";
+            windowStart = now;
+            linesInWindow = 0;
+            dropped = 0;
+        }
+        if (linesInWindow >= linesPerSecond) {
+            ++dropped;
+            return;
+        }
+        ++linesInWindow;
+    }
+    if (!note.empty())
+        log("console", 4, note.c_str());
+    log(source, level, line.c_str());
+}
+
+void captureConsoleStream(int fd, const char *source, int32_t level)
+{
+    int pipeFds[2];
+    if (pipe(pipeFds) != 0)
+        return;
+    const int original = dup(fd);
+    if (original < 0 || dup2(pipeFds[1], fd) < 0) {
+        if (original >= 0)
+            close(original);
+        close(pipeFds[0]);
+        close(pipeFds[1]);
+        return;
+    }
+    close(pipeFds[1]);
+    std::thread([readFd = pipeFds[0], original, source, level] {
+        std::string line;
+        char buffer[4096];
+        for (;;) {
+            const ssize_t count = read(readFd, buffer, sizeof buffer);
+            if (count < 0 && errno == EINTR)
+                continue;
+            if (count <= 0)
+                break;
+            for (ssize_t written = 0; written < count;) {
+                const ssize_t n = write(original, buffer + written, size_t(count - written));
+                if (n < 0 && errno == EINTR)
+                    continue;
+                if (n <= 0)
+                    break;
+                written += n;
+            }
+            for (ssize_t i = 0; i < count; ++i) {
+                const char c = buffer[i];
+                if (c == '\n' || line.size() >= 2000) {
+                    forwardConsoleLine(source, level, line);
+                    line.clear();
+                    if (c == '\n')
+                        continue;
+                }
+                if (c != '\r')
+                    line.push_back(c);
+            }
+        }
+    }).detach();
+}
+
+void startConsoleCapture()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::fflush(stdout);
+        std::fflush(stderr);
+        captureConsoleStream(STDOUT_FILENO, "stdout", 3);
+        captureConsoleStream(STDERR_FILENO, "stderr", 4);
+        // A pipe makes stdout fully buffered; keep lines in order with stderr.
+        std::setvbuf(stdout, nullptr, _IOLBF, 0);
+    });
 }
 
 void forwardSDLLog(void *, int category, SDL_LogPriority priority, const char *message)
@@ -125,6 +228,8 @@ SDL_AppResult hostQuit(void *state, SDL_AppResult result)
 
 void hostSessionEnded()
 {
+    std::fflush(stdout);
+    consoleForwarding.store(false, std::memory_order_release);
     appState = nullptr;
     platformName.clear();
     mikage_platform_set_menu_gesture(false);
@@ -231,6 +336,8 @@ extern "C" bool MikageArtemisStart(const MikageArtemisLaunchOptions *options,
             SDL_GetLogOutputFunction(&previousLogOutput, &previousLogContext);
             SDL_SetLogOutputFunction(forwardSDLLog, nullptr);
         }
+        startConsoleCapture();
+        consoleForwarding.store(true, std::memory_order_release);
         mikage_platform_set_menu_gesture(options->menuGestureEnabled);
         // A resume latched by an earlier game must not reach this one.
         oa::plat::take_lifecycle_resume();

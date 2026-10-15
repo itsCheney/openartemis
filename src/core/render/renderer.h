@@ -479,6 +479,7 @@ private:
     // video channel (the app-side layer_*_rev maps, moved with the pump).
     std::map<std::string, uint64_t> pump_emote_rev_;
     std::map<std::string, const void*> pump_emote_player_; // player drawn last
+    std::map<std::string, int> emote_draw_logs_; // diagnostics lines per layer
     std::map<std::string, uint64_t> pump_video_rev_;
     uint64_t pump_overlay_rev_ = 0;
     /// upload_host_frame with the host-side luma-key fused into the texture
