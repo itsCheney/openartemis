@@ -440,6 +440,10 @@ private:
 	size_t decoded_bytes_ = 0;
 	size_t decoded_cap_mb_ = 1024;
 	void decoded_note(const std::string& name, oa::media::Image&& img);
+	void touch_decoded(const std::string& name);
+	// Stamps at or above this were used by the frame being drawn and are
+	// not evicted (render_beigin sets it).
+	uint64_t frame_stamp_floor_ = 0;
 	void decoded_evict_if_needed();
 	// 纹理缓存按 TextureKey 域分桶 —— 资源文件(Asset)与
 	// 宿主供帧(VideoFrame/EmoteCanvas/OverlayFrame)结构性分开,撞名不可能,

@@ -824,6 +824,11 @@ const oa::media::Image* RenderEngine::resolve_image(const std::string& name)
 /// byte cap. Eviction destroys the GPU textures mirroring the evicted
 /// pixels (the plain asset texture and every masked composite built from
 /// it) — they re-create on demand if the scene shows them again.
+void RenderEngine::touch_decoded(const std::string& name) {
+    const auto it = decoded_use_.find(name);
+    if (it != decoded_use_.end()) it->second = ++cache_stamp_;
+}
+
 void RenderEngine::decoded_note(const std::string& name, oa::media::Image&& img) {
     decoded_bytes_ += img.rgba.size();
     decoded[name] = std::move(img);
@@ -855,6 +860,10 @@ void RenderEngine::decoded_evict_if_needed() {
     std::sort(order.begin(), order.end());
     for (const auto& [stamp, name] : order) {
         if (decoded_bytes_ <= cap_mb * 1024ull * 1024ull) break;
+        // Never drop what this frame already used: its pointers and sizes
+        // are still in play. The cache may exceed the cap for one frame
+        // and is trimmed again when the next frame starts.
+        if (stamp >= frame_stamp_floor_) break;
         const auto di = decoded.find(name);
         if (di == decoded.end()) continue; // composite key already gone
         decoded_bytes_ -= di->second.rgba.size();
@@ -1359,7 +1368,12 @@ TextureRef RenderEngine::texture_for_key(const oa::render::TextureKey& key)
 {
     if (key.empty()) return nullptr;
     const auto it = textures.find(key);
-    if (it != textures.end()) return it->second;
+    if (it != textures.end()) {
+        // A drawn texture keeps its decoded pixels recent: eviction destroys
+        // both, and the layer's size comes from the pixels.
+        if (key.is_asset()) touch_decoded(key.name);
+        return it->second;
+    }
     // 只有资源文件域有解码回退;宿主供帧域(video/emote/overlay)由上传面
     // 填充缓存,缺失即"还没上传"(旧 textures-only 语义的域版本)。
     if (!key.is_asset()) return nullptr;
@@ -1481,9 +1495,17 @@ TextureRef RenderEngine::texture_for_masked(const oa::render::Layer& l)
     const std::string key = base.name + std::string("\x1f") + l.mask;
     const oa::render::TextureKey masked = oa::render::asset_key(key);
     const auto it = textures.find(masked);
-    if (it != textures.end()) return it->second;
+    if (it != textures.end()) {
+        // The layer is sized from the base image's pixels, so keep them as
+        // recent as the composite (otherwise the base ages out, takes the
+        // composite with it, and both decode again).
+        touch_decoded(base.name);
+        touch_decoded(key);
+        return it->second;
+    }
     const oa::media::Image* fimg = resolve_image(base.name);
     const oa::media::Image* mimg = resolve_image(l.mask);
+    fimg = resolve_image(base.name); // the mask decode may have trimmed the cache
     if (!fimg || !mimg || fimg->w != mimg->w || fimg->h != mimg->h) {
         return texture_for_key(base); // mask ignored on failure/mismatch
     }
@@ -1497,9 +1519,14 @@ TextureRef RenderEngine::texture_for_masked(const oa::render::Layer& l)
     }
     TextureRef tex = make_texture(out);
     if (!tex) return nullptr;
-    decoded_note(key, std::move(out)); // cache pixels (hit sampling etc.)
+    // Register the texture before noting the pixels: a trim inside
+    // decoded_note that drops the base must take this composite with it.
+    // Registered after, the composite outlived its base, and the layer
+    // (sized from the base pixels) stayed invisible until a load.
     textures[masked] = tex;
-    return tex;
+    decoded_note(key, std::move(out)); // cache pixels (hit sampling etc.)
+    const auto kept = textures.find(masked);
+    return kept == textures.end() ? nullptr : kept->second;
 }
 
 LocalQuad RenderEngine::quad_for_layer(const oa::render::Layer& l)
@@ -1669,6 +1696,9 @@ bool RenderEngine::group_path_required(const oa::render::Layer& l)
 void RenderEngine::render_beigin()
 {
     if (!backend_) return;
+    // Trim what the last frame left over the cap, then pin from here on.
+    frame_stamp_floor_ = cache_stamp_ + 1;
+    decoded_evict_if_needed();
     if (stage_rt) {
         backend_->set_target(stage_rt);
         backend_->clear_clip();
@@ -1737,7 +1767,17 @@ size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affi
     TextureRef tex = texture_for_masked(l);
     if (!tex) return 0;
     const LocalQuad q = quad_for_layer(l);
-    if (!q.has) return 0;
+    if (!q.has) {
+        // A texture without a size means its decoded pixels went missing.
+        static int reported = 0;
+        if (reported < 20) {
+            ++reported;
+            std::fprintf(stderr, "[render] layer '%s' (%s%s%s) has a texture but no "
+                         "size; not drawn\n", l.id.c_str(), l.file.c_str(),
+                         l.mask.empty() ? "" : ", mask ", l.mask.c_str());
+        }
+        return 0;
+    }
     backend_->set_texture_alpha_mod(tex, alpha_byte(op));
     // lyprop colormultiply (research: thyt 消息窗调色): texture color
     // mod 乘色作用于普通层绘制;无 colormultiply 时复位(纹理可能复用)。
