@@ -839,6 +839,10 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[])
 #if defined(SDL_PLATFORM_IOS)
         int render_height = 1080;
         bool group_gpu = true;
+        // Decoded images and their textures share the phone's memory; the
+        // desktop's 1 GB cap (twice that with the textures) gets the app
+        // killed.
+        state->oaRender->set_decoded_cache_mb(256);
 #else
         int render_height = 0;
         bool group_gpu = false;

@@ -63,6 +63,10 @@ public:
     /// kept premultiplied and composited with blend modes, without reading
     /// it back. Groups with grayscale/negative still take the CPU path.
     void set_gpu_group_composite(bool on) { gpu_group_composite_ = on; }
+    /// Byte cap (MB) of the decoded-image cache, which also bounds the
+    /// asset textures mirroring it (0 = unbounded; default 1024).
+    /// OA_DECODED_CACHE_MB overrides it.
+    void set_decoded_cache_mb(size_t mb);
     /// Backend error surface (backend->last_error()) — host
     /// canaries like OA_RENDER_DIAG no longer read SDL_GetError directly,
     /// the gles backend keeps its own error text.
@@ -434,6 +438,7 @@ private:
 	std::map<std::string, uint64_t> decoded_use_;
 	uint64_t cache_stamp_ = 0;
 	size_t decoded_bytes_ = 0;
+	size_t decoded_cap_mb_ = 1024;
 	void decoded_note(const std::string& name, oa::media::Image&& img);
 	void decoded_evict_if_needed();
 	// 纹理缓存按 TextureKey 域分桶 —— 资源文件(Asset)与
@@ -473,6 +478,7 @@ private:
     // Host-frame pump bookkeeping: last uploaded revision per emote layer /
     // video channel (the app-side layer_*_rev maps, moved with the pump).
     std::map<std::string, uint64_t> pump_emote_rev_;
+    std::map<std::string, const void*> pump_emote_player_; // player drawn last
     std::map<std::string, uint64_t> pump_video_rev_;
     uint64_t pump_overlay_rev_ = 0;
     /// upload_host_frame with the host-side luma-key fused into the texture

@@ -831,14 +831,21 @@ void RenderEngine::decoded_note(const std::string& name, oa::media::Image&& img)
     decoded_evict_if_needed();
 }
 
+void RenderEngine::set_decoded_cache_mb(size_t mb) {
+    decoded_cap_mb_ = mb;
+    decoded_evict_if_needed();
+}
+
 void RenderEngine::decoded_evict_if_needed() {
-    static const size_t cap_mb = [] {
+    // OA_DECODED_CACHE_MB wins over the host's choice.
+    static const long env_mb = [] {
         if (const char* v = std::getenv("OA_DECODED_CACHE_MB")) {
             const long n = std::atol(v);
-            if (n >= 0) return size_t(n);
+            if (n >= 0) return n;
         }
-        return size_t(1024);
+        return -1L;
     }();
+    const size_t cap_mb = env_mb >= 0 ? size_t(env_mb) : decoded_cap_mb_;
     if (cap_mb == 0 || decoded_bytes_ <= cap_mb * 1024ull * 1024ull) return;
     // least-recently used first (oldest stamp)
     std::vector<std::pair<uint64_t, std::string>> order;
@@ -904,6 +911,19 @@ bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
     TextureRef canvas = nullptr;
     const auto ct = emote_canvas_.find(key);
     if (ct != emote_canvas_.end()) canvas = ct->second;
+    if (canvas) {
+        // A layer id can be reused for another figure with a different
+        // canvas size: drawing it into the old canvas would clip or
+        // misplace it until the scene is rebuilt (e.g. by loading a save).
+        float cw = 0, ch = 0;
+        if (!backend_->texture_size(canvas, &cw, &ch) || int(cw) != w ||
+            int(ch) != h) {
+            textures.erase(key);
+            backend_->destroy_texture(canvas);
+            emote_canvas_.erase(key);
+            canvas = nullptr;
+        }
+    }
     if (!canvas) {
         canvas = backend_->create_texture(w, h, TextureAccess::Target);
         if (!canvas) return false;
@@ -975,6 +995,12 @@ bool RenderEngine::emote_render_parts(const oa::render::TextureKey& key,
                                      src.textureWidth * 4);
             backend_->set_texture_blend(atlas, BlendMode::Blend);
             emote_atlases_[akey] = atlas;
+            // The GPU copy is all this path draws from; a 4096x4096 atlas
+            // is 64 MB of pixels to keep twice. ensure_atlas decodes again
+            // if another layer (or the CPU raster) needs them.
+            auto* owned = const_cast<oa::emote::EmoteSource*>(&src);
+            std::vector<uint8_t>().swap(owned->rgba);
+            owned->rgbaDecoded = false;
         }
         const oa::emote::EmoteIcon& ic = src.icons[size_t(part.icon)];
         stage.clear();
@@ -1131,7 +1157,11 @@ bool RenderEngine::pump_host_frames(bool* emote_presented) {
     for (const auto& [id, st] : rt_->emote_layers()) {
         if (!st.player) continue;
         st.player->set_external_pose(gpu);
-        if (st.revision == 0 || pump_emote_rev_[id] == st.revision) continue;
+        // A new player on the same layer id may start at the revision the
+        // old one was last drawn at; it still needs its first draw.
+        if (st.revision == 0 || (pump_emote_rev_[id] == st.revision &&
+                                 pump_emote_player_[id] == st.player.get()))
+            continue;
         // 读取域键 = 角色实例决定(emote 画布域,名 = 层 id;与场景侧
         // content_role_of(layer).texture_key 同源单点)。
         const oa::render::TextureKey tkey = oa::render::EmoteContent::canvas_key(id);
@@ -1152,6 +1182,7 @@ bool RenderEngine::pump_host_frames(bool* emote_presented) {
         }
         if (presented) {
             pump_emote_rev_[id] = st.revision;
+            pump_emote_player_[id] = st.player.get();
             // layer-model 簿记: 实际上传/GPU 合成 = HostFrame 内容写
             // （与 video 帧同款；redraw 门由返回值消费）。
             rt_->scene().mark_dirty(id, oa::render::DirtyAspect::HostFrame);
@@ -1255,6 +1286,10 @@ bool RenderEngine::pump_host_frames(bool* emote_presented) {
     // the pump bookkeeping itself: drop entries of ids that no longer exist
     for (auto it = pump_emote_rev_.begin(); it != pump_emote_rev_.end();) {
         if (!live_emote.count(it->first)) it = pump_emote_rev_.erase(it);
+        else ++it;
+    }
+    for (auto it = pump_emote_player_.begin(); it != pump_emote_player_.end();) {
+        if (!live_emote.count(it->first)) it = pump_emote_player_.erase(it);
         else ++it;
     }
     for (auto it = pump_video_rev_.begin(); it != pump_video_rev_.end();) {
