@@ -612,9 +612,17 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     const auto cmit = group_tex_cache.find(layer.id);
     if (cmit != group_tex_cache.end() && cmit->second) {
         // The bake already contains the subtree glyphs.
+        note_draw(layer, "group-cached", p.group_alpha,
+                  p.clip ? float(p.clip->x) : 0, p.clip ? float(p.clip->y) : 0,
+                  p.clip ? float(p.clip->w) : 0, p.clip ? float(p.clip->h) : 0);
         composite_group_bake(cmit->second, p, had_clip, old_clip);
         return;
     }
+    note_draw(layer, gpu_group_composite_ && !p.grayscale && !p.negative
+                         ? "group-gpu" : "group-cpu",
+              p.group_alpha, p.clip ? float(p.clip->x) : 0,
+              p.clip ? float(p.clip->y) : 0, p.clip ? float(p.clip->w) : 0,
+              p.clip ? float(p.clip->h) : 0);
     if (gpu_group_composite_ && !p.grayscale && !p.negative &&
         draw_group_gpu(sc, node, world, parent_op, p, had_clip, old_clip,
                        drawn_out))
@@ -1696,6 +1704,7 @@ bool RenderEngine::group_path_required(const oa::render::Layer& l)
 void RenderEngine::render_beigin()
 {
     if (!backend_) return;
+    frame_draws_.clear();
     // Trim what the last frame left over the cap, then pin from here on.
     frame_stamp_floor_ = cache_stamp_ + 1;
     decoded_evict_if_needed();
@@ -1745,8 +1754,10 @@ size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affi
             const FRect dst{ float(t.e), float(t.f), float(l.width),
                             float(l.height) };
             backend_->fill_rect(dst);
+            note_draw(l, "solid", op * l.solid_rgba[3] / 255.0, dst.x, dst.y, dst.w, dst.h);
         }
         else {
+            note_draw(l, "solid-affine", op * l.solid_rgba[3] / 255.0);
             TextureRef stex = solid_texture(l);
             if (!stex) return 0;
             backend_->set_texture_alpha_mod(stex,
@@ -1765,9 +1776,13 @@ size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affi
     // textured layer: file + optional lyc mask composition (texture_
     // for_masked), then the local quad (clip w/h or natural size)
     TextureRef tex = texture_for_masked(l);
-    if (!tex) return 0;
+    if (!tex) {
+        note_draw(l, "NO-TEXTURE", op);
+        return 0;
+    }
     const LocalQuad q = quad_for_layer(l);
     if (!q.has) {
+        note_draw(l, "NO-SIZE", op);
         // A texture without a size means its decoded pixels went missing.
         static int reported = 0;
         if (reported < 20) {
@@ -1798,6 +1813,7 @@ size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affi
         // pixel baselines stable
         const FRect dst{ float(t.e), float(t.f), float(q.w), float(q.h) };
         backend_->draw_texture(tex, q.has_src ? &q.src : nullptr, &dst);
+        note_draw(l, "image", op, dst.x, dst.y, dst.w, dst.h);
     }
     else {
         // general affine (rotate / non-uniform or negative scale):
@@ -1810,6 +1826,7 @@ size_t RenderEngine::draw_one(const oa::render::Layer& l, const oa::render::Affi
             dn{ float(x2), float(y2) };
         backend_->draw_texture_affine(tex, q.has_src ? &q.src : nullptr, o, r,
             dn);
+        note_draw(l, "image-affine", op, o.x, o.y, float(q.w), float(q.h));
     }
     return 1;
 }
@@ -2007,6 +2024,44 @@ void RenderEngine::render_end()
     }
     backend_->present();
     if (stage_rt) backend_->set_target(stage_rt);
+    if (trace_countdown_ > 0 && --trace_countdown_ == 0)
+        print_draws(frame_draws_, trace_tag_);
+}
+
+void RenderEngine::note_draw(const oa::render::Layer& l, const char* what,
+                             double op, float x, float y, float w, float h) {
+    if (frame_draws_.size() >= 400) return;
+    DrawRecord r;
+    r.id = l.id;
+    r.file = l.file;
+    if (!l.mask.empty()) r.file += " mask " + l.mask;
+    r.what = what;
+    r.op = op;
+    r.x = x;
+    r.y = y;
+    r.w = w;
+    r.h = h;
+    r.offscreen = backend_ && backend_->current_target() != stage_rt;
+    frame_draws_.push_back(std::move(r));
+}
+
+void RenderEngine::print_draws(const std::vector<DrawRecord>& recs,
+                               const std::string& tag) const {
+    for (const DrawRecord& r : recs) {
+        std::fprintf(stderr, "[draw %s] %s '%s' %s op=%.3f %.0f,%.0f %.0fx%.0f%s\n",
+                     tag.c_str(), r.what.c_str(), r.id.c_str(), r.file.c_str(),
+                     r.op, r.x, r.y, r.w, r.h, r.offscreen ? " offscreen" : "");
+    }
+    std::fprintf(stderr, "[draw %s] %zu records\n", tag.c_str(), recs.size());
+}
+
+void RenderEngine::dump_frame_draws(const std::string& tag, int frames_later) {
+    // Between frames frame_draws_ holds the last rendered frame.
+    print_draws(frame_draws_, tag);
+    if (frames_later > 0) {
+        trace_countdown_ = frames_later;
+        trace_tag_ = tag + " +" + std::to_string(frames_later);
+    }
 }
 
 }

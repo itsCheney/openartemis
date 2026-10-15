@@ -65,7 +65,7 @@ void forwardConsoleLine(const char *source, int32_t level, const std::string &li
     if (!consoleForwarding.load(std::memory_order_acquire) || line.empty())
         return;
     // A script printing every frame must not flood the diagnostics log.
-    constexpr int linesPerSecond = 200;
+    constexpr int linesPerSecond = 1000;
     static std::mutex mutex;
     static auto windowStart = std::chrono::steady_clock::now();
     static int linesInWindow = 0;

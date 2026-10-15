@@ -1453,6 +1453,13 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     state->input.key_down_edges.clear();
     state->input.key_up_edges.clear();
     if (state->rt->exit_requested()) state->quit = true;
+    // A save or load this tick: log what the last frame drew (the scene as
+    // the player saw it) and, a second later, what the scene draws then.
+    if (state->rt->save_load_serial() != state->save_load_seen) {
+        state->save_load_seen = state->rt->save_load_serial();
+        state->oaRender->dump_frame_draws("save/load #" +
+                                          std::to_string(state->save_load_seen), 60);
+    }
     const std::vector<oa::runtime::Event> drained_events = state->rt->drain_events();
     for (const auto& e : drained_events) state->oaRender->process_event(e);
     // stream every fresh media frame into the renderer's textures (video

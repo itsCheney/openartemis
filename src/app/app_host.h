@@ -93,6 +93,7 @@ struct AppState
     Uint64 last = 0;
     bool quit = false;
     uint64_t frames = 0;
+    uint64_t save_load_seen = 0; // GameRuntime::save_load_serial last handled
     // 'rr' autodrive flow: raw story start + opening-video park watcher.
     bool ad_rr_video = false;
     bool ad_rr_started = false;

@@ -614,6 +614,11 @@ public:
     /// animation finishes; presence == running). Motion-gate granularity for
     /// [trans].
     bool layer_anime_active(const std::string& id) const;
+    /// Diagnostics: log every visible layer with content (id, file, mask,
+    /// alpha, position, running tween/anime) to stderr, plus every field
+    /// where the live layer differs from what restoring a save of its props
+    /// would rebuild. Lines start with `[scene <tag>]`.
+    void debug_dump(const char* tag) const;
     /// Sync-tween wait release condition: the layer is gone or holds no
     /// tween any more (sync_tween_finished, runtime/).
     bool layer_tweens_finished(const std::string& id) const;

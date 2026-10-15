@@ -299,6 +299,10 @@ public:
     // paint point — the old scene-wide trailing pass is gone; every drawable
     // message owns a scene node, materialized lazily by the runtime).
     size_t last_frame_glyphs() const { return frame_glyphs_; }
+    /// Diagnostics: log what the last rendered frame drew, one line per
+    /// layer and group (`[draw <tag>]`), then the same for the frame
+    /// `frames_later` renders from now when it is > 0.
+    void dump_frame_draws(const std::string& tag, int frames_later = 0);
     /// Inline glyph pass: draw the message-layer text bound to `node`
     /// right at the node's slot in the scene draw order (glyphs become scene
     /// content — any later layer, e.g. a black wipe, covers them; node
@@ -444,6 +448,19 @@ private:
 	// Stamps at or above this were used by the frame being drawn and are
 	// not evicted (render_beigin sets it).
 	uint64_t frame_stamp_floor_ = 0;
+    // Per-frame draw record for dump_frame_draws.
+    struct DrawRecord {
+        std::string id, file, what;
+        double op = 0;
+        float x = 0, y = 0, w = 0, h = 0;
+        bool offscreen = false;
+    };
+    std::vector<DrawRecord> frame_draws_;
+    int trace_countdown_ = 0;
+    std::string trace_tag_;
+    void note_draw(const oa::render::Layer& l, const char* what, double op,
+                   float x = 0, float y = 0, float w = 0, float h = 0);
+    void print_draws(const std::vector<DrawRecord>& recs, const std::string& tag) const;
 	void decoded_evict_if_needed();
 	// 纹理缓存按 TextureKey 域分桶 —— 资源文件(Asset)与
 	// 宿主供帧(VideoFrame/EmoteCanvas/OverlayFrame)结构性分开,撞名不可能,

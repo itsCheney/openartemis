@@ -43,6 +43,90 @@ bool Compositor::layer_anime_active(const std::string& id) const {
     return anim_->anime_states_.count(id) > 0;
 }
 
+void Compositor::debug_dump(const char* tag) const {
+    // The layer a load would rebuild from the saved props (Compositor::create
+    // on a fresh node).
+    const auto restored_of = [](const Layer& l) {
+        Layer r;
+        r.id = l.id;
+        if (const auto it = l.props.find("file"); it != l.props.end()) {
+            r.set_resource_file(it->second);
+            if (!it->second.empty()) r.has_color = false;
+        }
+        if (const auto it = l.props.find("path"); it != l.props.end()) r.path = it->second;
+        r.set_props(l.props);
+        return r;
+    };
+    const auto content_name = [](LayerContent c) {
+        return c == LayerContent::VideoFrame    ? "video"
+               : c == LayerContent::EmoteCanvas ? "emote"
+                                                : "file";
+    };
+    size_t shown = 0, diverged = 0;
+    const std::vector<const Layer*> order = draw_order();
+    for (const Layer* lp : order) {
+        const Layer& l = *lp;
+        const Layer r = restored_of(l);
+        std::string diff;
+        const auto add = [&diff](const char* k, const std::string& live,
+                                 const std::string& rest) {
+            diff += std::string(" ") + k + "=" + live + "->" + rest;
+        };
+        const auto num = [](double d) {
+            char b[32];
+            std::snprintf(b, sizeof b, "%g", d);
+            return std::string(b);
+        };
+        if (l.file != r.file) add("file", "'" + l.file + "'", "'" + r.file + "'");
+        if (l.mask != r.mask) add("mask", "'" + l.mask + "'", "'" + r.mask + "'");
+        if (l.content != r.content) add("content", content_name(l.content), content_name(r.content));
+        if (l.has_color != r.has_color) add("solid", l.has_color ? "1" : "0", r.has_color ? "1" : "0");
+        if (l.visible != r.visible) add("visible", l.visible ? "1" : "0", r.visible ? "1" : "0");
+        if (std::fabs(l.alpha - r.alpha) > 1e-6) add("alpha", num(l.alpha), num(r.alpha));
+        if (std::fabs(l.left - r.left) > 1e-6 || std::fabs(l.top - r.top) > 1e-6)
+            add("pos", num(l.left) + "," + num(l.top), num(r.left) + "," + num(r.top));
+        if (std::fabs(l.x_scale - r.x_scale) > 1e-6 || std::fabs(l.y_scale - r.y_scale) > 1e-6)
+            add("scale", num(l.x_scale) + "," + num(l.y_scale), num(r.x_scale) + "," + num(r.y_scale));
+        if (l.has_clip != r.has_clip || l.clip_w != r.clip_w || l.clip_h != r.clip_h ||
+            l.clip_x != r.clip_x || l.clip_y != r.clip_y)
+            add("clip", l.has_clip ? num(l.clip_x) + "," + num(l.clip_y) + "," + num(l.clip_w) + "," + num(l.clip_h) : "none",
+                r.has_clip ? num(r.clip_x) + "," + num(r.clip_y) + "," + num(r.clip_w) + "," + num(r.clip_h) : "none");
+        const bool has_content = !l.file.empty() || l.has_color ||
+                                 l.content != LayerContent::Unbound;
+        const bool eff = is_effectively_visible(l.id);
+        if (!diff.empty()) ++diverged;
+        if (diff.empty() && (!has_content || !eff)) continue;
+        ++shown;
+        std::string extra;
+        for (const char* k : {"intermediate_render", "intermediate_render_mask",
+                              "layermode", "colormultiply", "grayscale", "negative"}) {
+            if (const auto it = l.props.find(k); it != l.props.end())
+                extra += std::string(" ") + k + "=" + it->second;
+        }
+        if (const auto it = anim_->tweens_.find(l.id);
+            it != anim_->tweens_.end() && !it->second.empty()) {
+            extra += " tween:";
+            for (const Tween& t : it->second) extra += " " + t.param;
+        }
+        if (anim_->anime_states_.count(l.id)) extra += " anime";
+        std::fprintf(stderr,
+                     "[scene %s] '%s' %s%s%s%s a=%.3f%s at %s,%s%s%s%s\n", tag,
+                     l.id.c_str(),
+                     l.content != LayerContent::Unbound ? content_name(l.content)
+                     : l.has_color                      ? "solid"
+                                                        : "",
+                     l.file.c_str(), l.mask.empty() ? "" : " mask ",
+                     l.mask.c_str(), l.alpha, eff ? "" : " hidden",
+                     num(l.left).c_str(), num(l.top).c_str(), extra.c_str(),
+                     diff.empty() ? "" : " | load would change:", diff.c_str());
+    }
+    std::fprintf(stderr,
+                 "[scene %s] %zu layers, %zu listed, %zu differ from their saved "
+                 "props, tweens on %zu, anime on %zu\n",
+                 tag, order.size(), shown, diverged, anim_->tweens_.size(),
+                 anim_->anime_states_.size());
+}
+
 namespace {
 
 // ---------------------------------------------------------------------------

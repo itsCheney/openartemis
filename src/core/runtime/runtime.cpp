@@ -208,6 +208,7 @@ LoadResult GameRuntime::load_game(const std::string& file, int64_t trans_type) {
     return s_->load_game(file, trans_type);
 }
 bool GameRuntime::load_game_from(const std::string& file, int64_t trans_type) { return s_->load_game_from(file, trans_type); }
+uint64_t GameRuntime::save_load_serial() const { return s_->save_load_serial_; }
 const std::string& GameRuntime::savepath() const { return s_->savepath(); }
 bool GameRuntime::save_file_exists(const std::string& file) const { return s_->save_file_exists(file); }
 void GameRuntime::apply_save_event(const oa::runtime::Event& e) { s_->apply_save_event(e); }

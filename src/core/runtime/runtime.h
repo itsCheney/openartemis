@@ -364,6 +364,8 @@ public:
     LoadResult load_game(const std::string& file, int64_t trans_type);
     /// `load_game(...) == LoadResult::Ok`。
     bool load_game_from(const std::string& file, int64_t trans_type);
+    /// Changes after every numbered save and successful load.
+    uint64_t save_load_serial() const;
     /// Current logical save path prefix (sanitized from the ini SAVEPATH).
     const std::string& savepath() const;
     /// Whether numbered-save files exist (save slot list checks).

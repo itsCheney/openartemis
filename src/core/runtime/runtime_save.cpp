@@ -398,6 +398,8 @@ bool GameRuntime::RuntimeState::save_game_to(const std::string& file) {
     }
     collect_scene_snapshot(&data, scene_);
     collect_audio_snapshot(&data, audio_);
+    scene_.debug_dump("save");
+    ++save_load_serial_;
     const std::string doc = data.encode();
     const std::string path = qualify_save_file(file);
     if (path.empty()) {
@@ -667,6 +669,9 @@ LoadResult GameRuntime::RuntimeState::load_game(const std::string& file, int64_t
     const bool had_tweens = scene_.has_tweens();
     const bool had_anime = scene_.has_anime();
 
+    scene_.debug_dump("before load");
+    ++save_load_serial_;
+
     // [C] 桶读档清场（逐项见 reset_ephemeral_on_load）。
     const size_t cleared = reset_ephemeral_on_load();
 
@@ -732,6 +737,7 @@ LoadResult GameRuntime::RuntimeState::load_game(const std::string& file, int64_t
 
     if (data.has_audio) restore_audio_snapshot(&audio_, data.audio);
     sync_system_audio_volumes();
+    scene_.debug_dump("after load");
 
     // [load type=..] runs one transition after the restore (type 0 instant).
     if (trans_type == 1 || trans_type == 2) {

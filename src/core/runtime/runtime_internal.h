@@ -654,6 +654,8 @@ struct GameRuntime::RuntimeState {
     // runtime-owned Artemis scene compositor + diagnostics counters
     // [B] E: A 面投影源（LayerSnap/root_props）；读档 = clear + restore_scene_snapshot 重放；不随投影恢复的面（消息槽/绑定/输入行/动画/内容角色）见 runtime_save.cpp
     oa::render::Compositor scene_;
+    /// Bumped by every numbered save and successful load (host diagnostics).
+    uint64_t save_load_serial_ = 0;
     // [C] E: 诊断计数
     size_t scene_layer_events_ = 0;
     // [C] E: 诊断计数
