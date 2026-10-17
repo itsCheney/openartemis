@@ -454,17 +454,21 @@ private:
 	uint64_t frame_stamp_floor_ = 0;
     // Per-frame draw record for dump_frame_draws.
     struct DrawRecord {
-        std::string id, file, what;
+        std::string id, file;
+        const char* what = ""; // always a string literal
         double op = 0;
         float x = 0, y = 0, w = 0, h = 0;
         bool offscreen = false;
     };
+    // Records are reused across frames (their strings keep their capacity);
+    // the first frame_draw_count_ belong to the last frame.
     std::vector<DrawRecord> frame_draws_;
+    size_t frame_draw_count_ = 0;
     int trace_countdown_ = 0;
     std::string trace_tag_;
     void note_draw(const oa::render::Layer& l, const char* what, double op,
                    float x = 0, float y = 0, float w = 0, float h = 0);
-    void print_draws(const std::vector<DrawRecord>& recs, const std::string& tag) const;
+    void print_draws(const std::string& tag) const;
 	void decoded_evict_if_needed();
 	// 纹理缓存按 TextureKey 域分桶 —— 资源文件(Asset)与
 	// 宿主供帧(VideoFrame/EmoteCanvas/OverlayFrame)结构性分开,撞名不可能,

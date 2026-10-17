@@ -526,19 +526,50 @@ void RenderEngine::group_composite_cpu(const std::vector<uint8_t>& px,
     // subtree painted nothing; full-stage opaque roots (the 1.0 scene group)
     // are unaffected visually because they draw first over the stage target
     // that render_beigin already cleared to opaque black.
-    for (int y = 0; y < stage_h; ++y) {
-        for (int x = 0; x < stage_w; ++x) {
-            const size_t i = (size_t(y) * stage_w + size_t(x)) * 4;
-            const double A = px[i + 3] / 255.0;
-            double r = 0, g = 0, b = 0;
-            if (A > 0.0) {
-                r = px[i] / (A * 255.0);
-                g = px[i + 1] / (A * 255.0);
-                b = px[i + 2] / (A * 255.0);
-            }
-            r *= p.color_multiply[0];
-            g *= p.color_multiply[1];
-            b *= p.color_multiply[2];
+    //
+    // Only the group clip is computed: the subtree was drawn under it and the
+    // bake is composited under it, so pixels outside stay zero. The per-pixel
+    // work avoids divisions (reciprocal table, precomputed mask columns).
+    int x0 = 0, y0 = 0, x1 = stage_w, y1 = stage_h;
+    if (p.clip && p.clip->w > 0 && p.clip->h > 0) {
+        x0 = std::clamp(p.clip->x, 0, stage_w);
+        y0 = std::clamp(p.clip->y, 0, stage_h);
+        x1 = std::clamp(p.clip->x + p.clip->w, x0, stage_w);
+        y1 = std::clamp(p.clip->y + p.clip->h, y0, stage_h);
+    }
+    static const std::array<double, 256> inv_alpha = [] {
+        std::array<double, 256> t{};
+        for (int a = 1; a < 256; ++a) t[a] = 1.0 / a;
+        return t;
+    }();
+    std::vector<int> mask_col;
+    if (p.mask) {
+        mask_col.resize(size_t(x1 - x0));
+        for (int x = x0; x < x1; ++x)
+            mask_col[size_t(x - x0)] =
+                std::clamp(int((double(x) / stage_w) * p.mask->w), 0, p.mask->w - 1);
+    }
+    const double cm_r = p.color_multiply[0];
+    const double cm_g = p.color_multiply[1];
+    const double cm_b = p.color_multiply[2];
+    const auto to_byte = [](double v) {
+        return uint8_t(std::clamp(v * 255.0, 0.0, 255.0) + 0.5);
+    };
+    for (int y = y0; y < y1; ++y) {
+        const uint8_t* mask_row = nullptr;
+        if (p.mask) {
+            const int my =
+                std::clamp(int((double(y) / stage_h) * p.mask->h), 0, p.mask->h - 1);
+            mask_row = p.mask->rgba.data() + size_t(my) * size_t(p.mask->w) * 4;
+        }
+        const uint8_t* src = px.data() + (size_t(y) * stage_w + size_t(x0)) * 4;
+        uint8_t* dst = out_px->data() + (size_t(y) * stage_w + size_t(x0)) * 4;
+        for (int x = x0; x < x1; ++x, src += 4, dst += 4) {
+            const int a = src[3];
+            const double inv = inv_alpha[a]; // 0 for a == 0: rgb stays 0
+            double r = src[0] * inv * cm_r;
+            double g = src[1] * inv * cm_g;
+            double b = src[2] * inv * cm_b;
             if (p.grayscale) {
                 const double luma = 0.299 * r + 0.587 * g + 0.114 * b;
                 r = g = b = luma;
@@ -548,24 +579,15 @@ void RenderEngine::group_composite_cpu(const std::vector<uint8_t>& px,
                 g = 1.0 - g;
                 b = 1.0 - b;
             }
-            double maskA = 1.0;
-            if (p.mask) {
-                const int mx = int((double(x) / stage_w) * p.mask->w);
-                const int my = int((double(y) / stage_h) * p.mask->h);
-                const size_t mi =
-                    (size_t(std::clamp(my, 0, p.mask->h - 1)) *
-                         size_t(p.mask->w) +
-                     size_t(std::clamp(mx, 0, p.mask->w - 1))) *
-                        4 +
-                    3;
-                maskA = p.mask->rgba[mi] / 255.0;
+            dst[0] = to_byte(r);
+            dst[1] = to_byte(g);
+            dst[2] = to_byte(b);
+            if (mask_row) {
+                const int ma = mask_row[size_t(mask_col[size_t(x - x0)]) * 4 + 3];
+                dst[3] = to_byte((a / 255.0) * (ma / 255.0));
+            } else {
+                dst[3] = uint8_t(a);
             }
-            const double out_a = A * maskA;
-            (*out_px)[i] = uint8_t(std::clamp(r * 255.0, 0.0, 255.0) + 0.5);
-            (*out_px)[i + 1] = uint8_t(std::clamp(g * 255.0, 0.0, 255.0) + 0.5);
-            (*out_px)[i + 2] = uint8_t(std::clamp(b * 255.0, 0.0, 255.0) + 0.5);
-            (*out_px)[i + 3] =
-                uint8_t(std::clamp(out_a * 255.0, 0.0, 255.0) + 0.5);
         }
     }
 }
@@ -1726,7 +1748,7 @@ bool RenderEngine::group_path_required(const oa::render::Layer& l)
 void RenderEngine::render_beigin()
 {
     if (!backend_) return;
-    frame_draws_.clear();
+    frame_draw_count_ = 0;
     // Trim what the last frame left over the cap, then pin from here on.
     frame_stamp_floor_ = cache_stamp_ + 1;
     decoded_evict_if_needed();
@@ -2069,16 +2091,20 @@ void RenderEngine::render_end()
     backend_->present();
     if (stage_rt) backend_->set_target(stage_rt);
     if (trace_countdown_ > 0 && --trace_countdown_ == 0)
-        print_draws(frame_draws_, trace_tag_);
+        print_draws(trace_tag_);
 }
 
 void RenderEngine::note_draw(const oa::render::Layer& l, const char* what,
                              double op, float x, float y, float w, float h) {
-    if (frame_draws_.size() >= 400) return;
-    DrawRecord r;
-    r.id = l.id;
-    r.file = l.file;
-    if (!l.mask.empty()) r.file += " mask " + l.mask;
+    if (frame_draw_count_ >= 400) return;
+    if (frame_draw_count_ == frame_draws_.size()) frame_draws_.emplace_back();
+    DrawRecord& r = frame_draws_[frame_draw_count_++];
+    r.id.assign(l.id);
+    r.file.assign(l.file);
+    if (!l.mask.empty()) {
+        r.file += " mask ";
+        r.file += l.mask;
+    }
     r.what = what;
     r.op = op;
     r.x = x;
@@ -2086,22 +2112,21 @@ void RenderEngine::note_draw(const oa::render::Layer& l, const char* what,
     r.w = w;
     r.h = h;
     r.offscreen = backend_ && backend_->current_target() != stage_rt;
-    frame_draws_.push_back(std::move(r));
 }
 
-void RenderEngine::print_draws(const std::vector<DrawRecord>& recs,
-                               const std::string& tag) const {
-    for (const DrawRecord& r : recs) {
+void RenderEngine::print_draws(const std::string& tag) const {
+    for (size_t i = 0; i < frame_draw_count_; ++i) {
+        const DrawRecord& r = frame_draws_[i];
         std::fprintf(stderr, "[draw %s] %s '%s' %s op=%.3f %.0f,%.0f %.0fx%.0f%s\n",
-                     tag.c_str(), r.what.c_str(), r.id.c_str(), r.file.c_str(),
+                     tag.c_str(), r.what, r.id.c_str(), r.file.c_str(),
                      r.op, r.x, r.y, r.w, r.h, r.offscreen ? " offscreen" : "");
     }
-    std::fprintf(stderr, "[draw %s] %zu records\n", tag.c_str(), recs.size());
+    std::fprintf(stderr, "[draw %s] %zu records\n", tag.c_str(), frame_draw_count_);
 }
 
 void RenderEngine::dump_frame_draws(const std::string& tag, int frames_later) {
     // Between frames frame_draws_ holds the last rendered frame.
-    print_draws(frame_draws_, tag);
+    print_draws(tag);
     if (frames_later > 0) {
         trace_countdown_ = frames_later;
         trace_tag_ = tag + " +" + std::to_string(frames_later);

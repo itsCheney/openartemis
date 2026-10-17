@@ -275,6 +275,7 @@ FT_Face FontSystem::load_font_face(const std::string& logical)
     if (logical.empty()) return nullptr;
     const auto fit = font_faces.find(logical);
     if (fit != font_faces.end()) return fit->second.face;
+    if (missing_faces_.count(logical)) return nullptr;
     // 候选：原路径 / .otf / .ttf（face 可带 magic 前缀）
     std::optional<std::vector<uint8_t>> bytes;
     std::string resolved_name = logical;
@@ -289,12 +290,16 @@ FT_Face FontSystem::load_font_face(const std::string& logical)
         }
     }
 
-    if (!bytes) return nullptr;
+    if (!bytes) {
+        missing_faces_.insert(logical);
+        return nullptr;
+    }
     FaceEntry fe;
     fe.bytes = *bytes;
     FT_Face face = nullptr;
     if (FT_New_Memory_Face(ft_lib, fe.bytes.data(), (FT_Long)fe.bytes.size(), 0,
         &face) != 0) {
+        missing_faces_.insert(logical);
         return nullptr;
     }
     fe.face = face;
@@ -308,8 +313,8 @@ FT_Face FontSystem::load_font_face(const std::string& logical)
 
 FT_Face FontSystem::face_for(const oa::render::FontDesc& f)
 {
-    const std::string face = f.face();
-    FT_Face r = face.empty() ? default_face : load_font_face(face);
+    const std::string* face = f.get("face");
+    FT_Face r = !face || face->empty() ? default_face : load_font_face(*face);
     if (!r) r = default_face; // 缺字形回退：脚本字体缺失 → 默认字体
     return r;
 }
@@ -358,6 +363,14 @@ FontSystem::GlyphMeasure FontSystem::measure_glyph(const FontDesc& f, uint32_t c
         return gm;
     }
     const int ppem = raster_ppem(face, size);
+    GlyphKey key;
+    key.face = face;
+    key.ppem = ppem;
+    key.cp = cp;
+    const auto cached = measure_cache.find(key);
+    if (cached != measure_cache.end()) {
+        return cached->second;
+    }
     gm.ppem = double(ppem);
     if (FT_Set_Pixel_Sizes(face, 0, (FT_UInt)ppem) != 0 ||
         FT_Load_Char(face, (FT_ULong)cp, FT_LOAD_DEFAULT) != 0) {
@@ -365,6 +378,8 @@ FontSystem::GlyphMeasure FontSystem::measure_glyph(const FontDesc& f, uint32_t c
         gm.ink_w = size;
         gm.ink_h = size;
         gm.ascent = face->size ? double(face->size->metrics.ascender) / 64.0 : size;
+        // Not cached: the fallback depends on the requested size, which
+        // several sizes rounding to one ppem do not share.
         return gm;
     }
     const double adv = double(face->glyph->advance.x) / 64.0;
@@ -377,6 +392,7 @@ FontSystem::GlyphMeasure FontSystem::measure_glyph(const FontDesc& f, uint32_t c
     // （对应 offset_y = sf.ascent + px_bounds.min.y）。
     gm.offset_x = double(face->glyph->bitmap_left);
     gm.offset_y = gm.ascent - double(face->glyph->bitmap_top);
+    measure_cache[key] = gm;
     return gm;
 }
 
@@ -401,11 +417,12 @@ FontSystem::CachedGlyph FontSystem::glyph_slot(oa::render::RenderBackend* backen
 {
     CachedGlyph none;
     if (!face || !backend) return none;
-    char keybuf[96];
     const double k = raster_scale_;
     const int ppem = std::max(1, (int)std::lround(raster_ppem(face, size) * k));
-    std::snprintf(keybuf, sizeof(keybuf), "%p\t%d\t%u", (void*)face, ppem, cp);
-    const std::string key = keybuf;
+    GlyphKey key;
+    key.face = face;
+    key.ppem = ppem;
+    key.cp = cp;
     const auto it = glyph_cache.find(key);
     if (it != glyph_cache.end()) return it->second;
     CachedGlyph cg;
@@ -450,10 +467,12 @@ FontSystem::CachedGlyph FontSystem::edge_slot(oa::render::RenderBackend* backend
     const int ppem = std::max(1, (int)std::lround(raster_ppem(face, size) * k));
     width_px *= k;
     const EdgeEncoding enc = edge_encoding_from_env();
-    char keybuf[128];
-    std::snprintf(keybuf, sizeof(keybuf), "%p\t%d\t%u\t%.2f\t%d", (void*)face, ppem,
-        cp, width_px, (int)enc);
-    const std::string key = keybuf;
+    GlyphKey key;
+    key.face = face;
+    key.ppem = ppem;
+    key.cp = cp;
+    key.width = (int)std::lround(width_px * 100.0);
+    key.enc = (int)enc;
     const auto it = edge_cache.find(key);
     if (it != edge_cache.end()) return it->second;
     CachedGlyph cg;
@@ -601,26 +620,26 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
             const oa::render::FPoint down{ float(x2), float(y2) };
             backend->draw_texture_affine(tex, nullptr, origin, right, down);
         };
-    for (const oa::render::LaidGlyph& g : page.glyphs) {
-        if (g.newline || !g.font) continue;
-        // reveal：只画已揭示字符
-        if (g.order >= ml.reveal_index) continue;
-        const double gsize = g.font->size();
-        // 栅格/落点按比例语义（ppem=round(size·upem/H)，见 measure_glyph）。
-        const GlyphMeasure gm = measure_glyph(*g.font, g.cp);
-        const CachedGlyph cg = glyph_slot(backend, face_for(*g.font), gsize, g.cp);
-        if (!cg.tex) continue;
-        // 本地落点：x = ml.left + 排版 x + 左 bearing；y = 行内容顶
-        // (line_content_top = 行盒顶 ml.top + spacetop) + 行内偏移 + ascent
-        // − 位图顶（offset_x=b.min.x、offset_y=sf.ascent+b.min.y，
-        // y-down 下 min.y ≡ −bitmap_top）。
-        const double lx = ml.left + g.x + double(cg.bitmap_left);
-        const double ly = line_content_top + double(g.line) * line_h +
-            gm.ascent - double(cg.bitmap_top);
-        const oa::render::Rgba col = text_color(*g.font);
+    // Font-derived style (face, size, colors, outline/shadow keys) is parsed
+    // from the FontDesc strings once per run of glyphs sharing a font, not
+    // once per glyph.
+    struct GlyphStyle {
+        FT_Face face = nullptr;
+        double size = 0;
+        oa::render::Rgba col{ 0, 0, 0, 255 };
         oa::render::Rgba shadow{ 0, 0, 0, 0 };
         oa::render::Rgba outline{ 0, 0, 0, 0 };
-        style_colors(*g.font, &shadow, &outline);
+        bool has_shadow = false, has_outline = false, num_shadow = false;
+        double ow_key = 0, sd_key = 0;
+    };
+    const oa::render::FontDesc* style_font = nullptr;
+    GlyphStyle st;
+    auto style_for = [&](const oa::render::FontDesc& font) {
+        GlyphStyle out;
+        out.face = face_for(font);
+        out.size = font.size();
+        out.col = text_color(font);
+        style_colors(font, &out.shadow, &out.outline);
         // 描边/阴影开关语义（两代框架并存）：
         //   - FPM 系（gt/NekoMiko …）[font] 行带 style="outline,shadow" 词;
         //   - iMel 系（rr/N1/N2/btjy/slny/tg3 list_windows*.tbl lang.font.*：
@@ -636,18 +655,45 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
         //     异常黑边的根本原因。**保留此前的保守项**：数值路径必须该行显式
         //     给出可解析 outlinecolor，否则不描边（不回退默认黑）。
         //     style 词路径语义不变（宽度取同一 outline 键/缺省 1px）。
-        const bool style_outline = style_word_on(*g.font, "outline");
-        const bool style_shadow = style_word_on(*g.font, "shadow");
-        double ow_key = 0, sd_key = 0;
-        const bool num_outline_key = numeric_edge_amount(*g.font, "outline", &ow_key);
+        const bool style_outline = style_word_on(font, "outline");
+        const bool style_shadow = style_word_on(font, "shadow");
+        const bool num_outline_key = numeric_edge_amount(font, "outline", &out.ow_key);
         bool num_outline = num_outline_key;
         if (num_outline) {
-            const std::string* oc = g.font->get("outlinecolor");
+            const std::string* oc = font.get("outlinecolor");
             if (!oc || !parse_rgb(*oc)) num_outline = false;
         }
-        const bool num_shadow = numeric_edge_amount(*g.font, "shadow", &sd_key);
-        const bool has_shadow = style_shadow || num_shadow;
-        const bool has_outline = style_outline || num_outline;
+        out.num_shadow = numeric_edge_amount(font, "shadow", &out.sd_key);
+        out.has_shadow = style_shadow || out.num_shadow;
+        out.has_outline = style_outline || num_outline;
+        return out;
+    };
+    for (const oa::render::LaidGlyph& g : page.glyphs) {
+        if (g.newline || !g.font) continue;
+        // reveal：只画已揭示字符
+        if (g.order >= ml.reveal_index) continue;
+        if (g.font != style_font) {
+            st = style_for(*g.font);
+            style_font = g.font;
+        }
+        const double gsize = st.size;
+        // 栅格/落点按比例语义（ppem=round(size·upem/H)，见 measure_glyph）。
+        const GlyphMeasure gm = measure_glyph(*g.font, g.cp);
+        const CachedGlyph cg = glyph_slot(backend, st.face, gsize, g.cp);
+        if (!cg.tex) continue;
+        // 本地落点：x = ml.left + 排版 x + 左 bearing；y = 行内容顶
+        // (line_content_top = 行盒顶 ml.top + spacetop) + 行内偏移 + ascent
+        // − 位图顶（offset_x=b.min.x、offset_y=sf.ascent+b.min.y，
+        // y-down 下 min.y ≡ −bitmap_top）。
+        const double lx = ml.left + g.x + double(cg.bitmap_left);
+        const double ly = line_content_top + double(g.line) * line_h +
+            gm.ascent - double(cg.bitmap_top);
+        const oa::render::Rgba& col = st.col;
+        const oa::render::Rgba& shadow = st.shadow;
+        const oa::render::Rgba& outline = st.outline;
+        const bool has_shadow = st.has_shadow, has_outline = st.has_outline;
+        const bool num_shadow = st.num_shadow;
+        const double ow_key = st.ow_key, sd_key = st.sd_key;
         // 描边宽度 px：数值键值（≥1）；缺失/不可解析 → 1px（style 词路径）。
         const double os = ow_key >= 1.0 ? ow_key : 1.0;
         // 阴影/描边/正文 pass：偏移在本地坐标加后再经世界映射（为世界坐标
@@ -671,7 +717,7 @@ size_t FontSystem::draw_text_layer(oa::render::RenderBackend* backend,
                     emit_pass(o[0] * os, o[1] * os, outline, 255);
             } else {
                 const CachedGlyph eg =
-                    edge_slot(backend, face_for(*g.font), gsize, g.cp, os);
+                    edge_slot(backend, st.face, gsize, g.cp, os);
                 if (eg.tex) {
                     // 与填充同一原点网格（bearing 相对笔端）⇒ 落点公式一致。
                     const double ex = ml.left + g.x + double(eg.bitmap_left);

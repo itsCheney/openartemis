@@ -2,6 +2,8 @@
 
 #include <vector>
 #include <map>
+#include <set>
+#include <tuple>
 #include <memory>
 #include <string>
 
@@ -154,8 +156,27 @@ private:
     FT_Stroker stroker_ = nullptr; // 连续描边（FT_Stroker_New(ft_lib)）
     double raster_scale_ = 1.0;
     std::map<std::string, FaceEntry> font_faces; // 逻辑 face → 已加载字体
-    std::map<std::string, CachedGlyph> glyph_cache; // key face\tppem\tcp
-    std::map<std::string, CachedGlyph> edge_cache;  // key face\tppem\tcp\tw\tenc
+    // Faces that failed to load: face_for runs per glyph per frame, and a
+    // missing face would otherwise retry three file reads every time.
+    std::set<std::string> missing_faces_;
+    // Glyph caches are hit for every glyph of every redrawn frame, so the
+    // key is plain integers (no formatted string per lookup).
+    struct GlyphKey {
+        FT_Face face = nullptr;
+        int ppem = 0;
+        uint32_t cp = 0;
+        int width = 0; // edge width in 1/100 px (edge_cache only)
+        int enc = 0;   // EdgeEncoding (edge_cache only)
+        bool operator<(const GlyphKey& o) const {
+            return std::tie(face, ppem, cp, width, enc) <
+                   std::tie(o.face, o.ppem, o.cp, o.width, o.enc);
+        }
+    };
+    std::map<GlyphKey, CachedGlyph> glyph_cache;
+    std::map<GlyphKey, CachedGlyph> edge_cache;
+    // measure_glyph results (face, ppem, cp): layout and drawing both measure
+    // every glyph each frame, and an uncached measure is an FT_Load_Char.
+    std::map<GlyphKey, GlyphMeasure> measure_cache;
 
     // 默认面（默认字体候选）
     const std::string kDefaultFace = std::string(oa::render::kDefaultFontFile);

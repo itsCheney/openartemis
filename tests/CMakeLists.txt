@@ -162,6 +162,11 @@ target_link_libraries(group_composite_test PRIVATE libopenartemis Freetype::Free
 add_test(NAME group_composite COMMAND group_composite_test)
 set_tests_properties(group_composite PROPERTIES SKIP_RETURN_CODE 77)
 
+add_executable(text_render_test text_render_test.cpp)
+target_link_libraries(text_render_test PRIVATE libopenartemis Freetype::Freetype)
+add_test(NAME text_render COMMAND text_render_test)
+set_tests_properties(text_render PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(p1c2_control_test p1c2_control_test.cpp)
 target_link_libraries(p1c2_control_test PRIVATE libopenartemis lua51)
 add_test(NAME p1c2_control_test COMMAND p1c2_control_test)
