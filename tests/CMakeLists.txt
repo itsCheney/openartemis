@@ -155,6 +155,13 @@ target_link_libraries(save_thumb_readback_test PRIVATE libopenartemis Freetype::
 add_test(NAME save_thumb_readback COMMAND save_thumb_readback_test)
 set_tests_properties(save_thumb_readback PROPERTIES ENVIRONMENT "OA_TEST_FPM_PFS=${OA_TEST_FPM_PFS}")
 
+# GPU vs CPU group composite and host-frame re-bakes; needs a GLES/Metal
+# renderer (offscreen EGL on Linux) and skips (77) with only software.
+add_executable(group_composite_test group_composite_test.cpp)
+target_link_libraries(group_composite_test PRIVATE libopenartemis Freetype::Freetype)
+add_test(NAME group_composite COMMAND group_composite_test)
+set_tests_properties(group_composite PROPERTIES SKIP_RETURN_CODE 77)
+
 add_executable(p1c2_control_test p1c2_control_test.cpp)
 target_link_libraries(p1c2_control_test PRIVATE libopenartemis lua51)
 add_test(NAME p1c2_control_test COMMAND p1c2_control_test)

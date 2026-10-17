@@ -61,7 +61,8 @@ public:
     float stage_scale() const { return stage_scale_; }
     /// Composite intermediate-render groups on the GPU: the group target is
     /// kept premultiplied and composited with blend modes, without reading
-    /// it back. Groups with grayscale/negative still take the CPU path.
+    /// it back. Grayscale groups still take the CPU path (no blend mode
+    /// mixes channels).
     void set_gpu_group_composite(bool on) { gpu_group_composite_ = on; }
     /// Byte cap (MB) of the decoded-image cache, which also bounds the
     /// asset textures mirroring it (0 = unbounded; default 1024).
@@ -263,6 +264,9 @@ public:
     // the offscreen architecture, so stage pixels are unchanged).
     void render_beigin();
     void render_clear_tex_cache();
+    /// Drop only the bakes of groups that hold one of these layer ids (or
+    /// are one): the rest of the scene did not change.
+    void render_clear_tex_cache_containing(const std::vector<std::string>& ids);
     size_t draw_one(const oa::render::Layer& l, const oa::render::Affine2& t,
         double op);
     std::optional<std::array<double, 3>> color_multiply_rgb(const std::string& v);
@@ -525,11 +529,14 @@ private:
     size_t trans_events = 0;
     // cached intermediate-group composite textures (baked WITHOUT the
     // group alpha — applied via alpha-mod at draw time so alpha tweens are
-    // cheap); invalidated whenever any scene mutation / animation ran.
+    // cheap); invalidated whenever any scene mutation / animation ran, and
+    // per group when only host frames (emote/video) inside it changed.
     std::map<std::string, TextureRef> group_tex_cache;
     // Bakes in group_tex_cache made on the GPU path: premultiplied stage
     // targets, recycled through group_target_pool_ instead of destroyed.
     std::set<TextureRef> gpu_group_bakes_;
+    // Return a bake to the target pool, or destroy it.
+    void release_group_bake(TextureRef t);
     std::vector<TextureRef> group_target_pool_;
     bool gpu_group_composite_ = false;
     int min_render_height_ = 0;

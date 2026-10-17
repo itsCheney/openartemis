@@ -45,6 +45,7 @@
 #include "core/render/renderer.h"
 #include "core/render/layer.h"
 #include "core/version.h"
+#include "core/util/stage_profile.h"
 
 // ---------------------------------------------------------------------------
 // openartemis / openartemis_test split.
@@ -1441,6 +1442,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     const uint64_t delta = now - state->last;
     state->last = now;
     try {
+        oa::prof::Scope tick_scope(oa::prof::Stage::Tick);
         state->rt->tick(delta > 0 ? delta : 1, state->input);
     }
     catch (const std::exception& e) {
@@ -1469,7 +1471,11 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // parked portrait (no text reveal / tween / transition) even though the
     // player keeps breathing underneath.
     bool emote_active = false;
-    const bool video_active = state->oaRender->pump_host_frames(&emote_active);
+    bool video_active = false;
+    {
+        oa::prof::Scope pump_scope(oa::prof::Stage::HostPump);
+        video_active = state->oaRender->pump_host_frames(&emote_active);
+    }
 #if OA_TEST_BUILD
     // OA_STATE_LOG=1: fine-grained headless-style state heartbeat (every 120
     // frames) for external drivers (Xvfb UX journeys): wait kind, layer count
@@ -1639,8 +1645,29 @@ SDL_AppResult SDL_AppIterate(void* appstate)
     // keep drawing the stale bake. An animated emote canvas is the same
     // kind of live host texture.
     if (scene_mutated || animated_now || s_prev_animated || text_changed ||
-        fade_active || video_active || emote_active) {
+        fade_active) {
         state->oaRender->render_clear_tex_cache();
+        oa::prof::count(oa::prof::Counter::BakeClearsAll);
+    } else if (video_active || emote_active) {
+        // Only host frames (emote poses, video frames) changed: a bake
+        // stays valid unless its group holds a layer that got a new frame.
+        // A breathing character or a looping video must not re-bake every
+        // other group (the CPU-composited ones read the stage back).
+        std::vector<std::string> host_ids;
+        bool other_writes = false;
+        for (const auto& [id, bits] : dirty_report) {
+            if (bits & uint16_t(oa::render::DirtyAspect::HostFrame))
+                host_ids.push_back(id);
+            if (bits & ~uint16_t(oa::render::DirtyAspect::HostFrame))
+                other_writes = true;
+        }
+        if (other_writes) {
+            state->oaRender->render_clear_tex_cache();
+            oa::prof::count(oa::prof::Counter::BakeClearsAll);
+        } else if (!host_ids.empty()) {
+            state->oaRender->render_clear_tex_cache_containing(host_ids);
+            oa::prof::count(oa::prof::Counter::BakeClearsHost);
+        }
     }
 
     // ---- render (static-frame skip: identical frames keep the last
@@ -1661,7 +1688,12 @@ SDL_AppResult SDL_AppIterate(void* appstate)
         // the slow path re-copied the tree map at every recursion level —
         // background-freeze hotspot).
         const oa::render::Compositor& sc = state->rt->scene();
-        const size_t drawn = state->oaRender->draw_scene(sc, global_fade);
+        size_t drawn = 0;
+        {
+            oa::prof::Scope draw_scope(oa::prof::Stage::SceneDraw);
+            drawn = state->oaRender->draw_scene(sc, global_fade);
+        }
+        oa::prof::count(oa::prof::Counter::Redraws);
 
         // L2 M3: glyphs painted at their node slots inside draw_scene (the
         // old scene-wide trailing text pass is gone — every drawable message
@@ -1699,7 +1731,10 @@ SDL_AppResult SDL_AppIterate(void* appstate)
         // deferred [takess] capture — snapshot this frame's
         // content (pre-present) when a takess request is pending.
         state->rt->post_frame_capture();
-        state->oaRender->render_end();
+        {
+            oa::prof::Scope present_scope(oa::prof::Stage::Present);
+            state->oaRender->render_end();
+        }
 #if OA_TEST_BUILD
         // auto-drive: sample the just-presented pixels (tail stage) and
         // note that a fresh frame exists for the driver's residue counting.
@@ -1714,6 +1749,7 @@ SDL_AppResult SDL_AppIterate(void* appstate)
         s_rendered_any = true;
     }
     ++state->frames;
+    oa::prof::count(oa::prof::Counter::Frames);
     if (state->frames == 1) std::printf("[app] first-frame layers=%zu\n", state->rt->scene().size());
 #if OA_TEST_BUILD
     // auto-drive state machine (runs every frame; pixel metrics only

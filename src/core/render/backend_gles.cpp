@@ -39,7 +39,7 @@ enum : unsigned int {
     GL_DST_COLOR_ = 0x0306,
     GL_BLEND_ = 0x0BE2, GL_SCISSOR_TEST_ = 0x0C11, GL_DEPTH_TEST_ = 0x0B71,
     GL_CULL_FACE_ = 0x0B44,
-    GL_FUNC_ADD_ = 0x8006,
+    GL_FUNC_ADD_ = 0x8006, GL_FUNC_SUBTRACT_ = 0x800A,
     GL_ARRAY_BUFFER_ = 0x8892, GL_DYNAMIC_DRAW_ = 0x88E8,
     GL_FRAGMENT_SHADER_ = 0x8B30, GL_VERTEX_SHADER_ = 0x8B31,
     GL_COMPILE_STATUS_ = 0x8B81, GL_LINK_STATUS_ = 0x8B82,
@@ -631,9 +631,14 @@ void GlesRenderBackend::apply_draw_state(GlesTexture* tex, BlendMode blend)
             case BlendMode::MaskMultiply:
                 glBlendFuncSeparate(GL_ZERO_, GL_SRC_ALPHA_, GL_ZERO_, GL_SRC_ALPHA_);
                 break;
+            case BlendMode::PremultInvert:
+                // src*dstA - dst; alpha srcA*dstA (= dstA, opaque source)
+                glBlendFuncSeparate(GL_DST_ALPHA_, GL_ONE_, GL_DST_ALPHA_, GL_ZERO_);
+                break;
             case BlendMode::None: break;
         }
-        glBlendEquation(GL_FUNC_ADD_);
+        glBlendEquation(blend == BlendMode::PremultInvert ? GL_FUNC_SUBTRACT_
+                                                          : GL_FUNC_ADD_);
     }
     if (cur_target_) {
         // FBO：clip = 内容坐标（SDL target 分支：不翻行）

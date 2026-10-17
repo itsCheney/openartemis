@@ -20,6 +20,7 @@
 #include "core/media/image.h"
 #include "core/render/renderer.h"
 #include "core/runtime/runtime.h"
+#include "core/util/stage_profile.h"
 #include "platform/Platform.h"
 
 #include <atomic>
@@ -482,6 +483,8 @@ extern "C" bool MikageArtemisGetStats(MikageArtemisStats *stats)
     stats->cpuFrameTimeMilliseconds = currentCpuFrameTimeMS;
     stats->maxCpuFrameTimeMilliseconds = currentMaxCpuFrameTimeMS;
     stats->drawCallsPerFrame = static_cast<double>(appState->s_last_drawn);
+    std::snprintf(stats->stageProfile, sizeof(stats->stageProfile), "%s",
+                  oa::prof::take_summary().c_str());
     if (appState->window) {
         int width = 0, height = 0;
         SDL_GetWindowSizeInPixels(appState->window, &width, &height);

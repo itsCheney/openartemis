@@ -103,6 +103,10 @@ typedef struct MikageArtemisStats {
     char renderer[32];
     // Layers the engine drew in its last rendered frame.
     double drawCallsPerFrame;
+    // CPU time per frame stage since the previous call, for diagnostics:
+    // "stage:calls/totalNS/maxNS,...;counter:N,..." (oa::prof). Reading
+    // the stats resets it.
+    char stageProfile[640];
 } MikageArtemisStats;
 bool MikageArtemisGetStats(MikageArtemisStats *stats);
 

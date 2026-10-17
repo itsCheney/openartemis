@@ -42,6 +42,14 @@ SDL_BlendMode to_sdl_blend(BlendMode m) {
                 SDL_BLENDOPERATION_ADD,
                 SDL_BLENDFACTOR_ZERO, SDL_BLENDFACTOR_SRC_ALPHA,
                 SDL_BLENDOPERATION_ADD);
+        case BlendMode::PremultInvert:
+            // color src*dstA - dst; alpha srcA*dstA - 0 (= dstA for an
+            // opaque source)
+            return SDL_ComposeCustomBlendMode(
+                SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ONE,
+                SDL_BLENDOPERATION_SUBTRACT,
+                SDL_BLENDFACTOR_DST_ALPHA, SDL_BLENDFACTOR_ZERO,
+                SDL_BLENDOPERATION_SUBTRACT);
         case BlendMode::Blend: break; // fallthrough to default
     }
     return SDL_BLENDMODE_BLEND;

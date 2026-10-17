@@ -4,6 +4,7 @@
 #include "core/emote/emote_file.h"
 #include "core/emote/emote_player.h"
 #include "core/media/video.h" // rgba_luma / layer_video_key_alpha (keyed upload)
+#include "core/util/stage_profile.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -618,15 +619,20 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
         composite_group_bake(cmit->second, p, had_clip, old_clip);
         return;
     }
-    note_draw(layer, gpu_group_composite_ && !p.grayscale && !p.negative
-                         ? "group-gpu" : "group-cpu",
+    // Grayscale mixes the color channels, which no blend mode can do; it
+    // stays on the CPU. Color multiply, negative and masks blend on the GPU.
+    const bool gpu_capable = gpu_group_composite_ && !p.grayscale;
+    note_draw(layer, gpu_capable ? "group-gpu" : "group-cpu",
               p.group_alpha, p.clip ? float(p.clip->x) : 0,
               p.clip ? float(p.clip->y) : 0, p.clip ? float(p.clip->w) : 0,
               p.clip ? float(p.clip->h) : 0);
-    if (gpu_group_composite_ && !p.grayscale && !p.negative &&
-        draw_group_gpu(sc, node, world, parent_op, p, had_clip, old_clip,
-                       drawn_out))
-        return;
+    if (gpu_capable) {
+        oa::prof::Scope gpu_scope(oa::prof::Stage::GroupGpu);
+        if (draw_group_gpu(sc, node, world, parent_op, p, had_clip, old_clip,
+                           drawn_out))
+            return;
+    }
+    oa::prof::Scope cpu_scope(oa::prof::Stage::GroupCpu);
     TextureRef group_tex = backend_->create_texture(stage_w_, stage_h_,
                                                     TextureAccess::StageTarget);
     if (!group_tex) {
@@ -651,8 +657,13 @@ void RenderEngine::draw_group_node(const oa::render::Compositor& sc,
     // read the group target back for the CPU composite
     int gw = 0, gh = 0;
     std::vector<uint8_t> px;
-    if (!backend_->read_target(&gw, &gh, &px) || gw != stage_w_ ||
-        gh != stage_h_) {
+    bool read_ok = false;
+    {
+        oa::prof::Scope read_scope(oa::prof::Stage::Readback);
+        read_ok = backend_->read_target(&gw, &gh, &px);
+    }
+    oa::prof::count(oa::prof::Counter::ReadbackBytes, px.size());
+    if (!read_ok || gw != stage_w_ || gh != stage_h_) {
         // failure / size mismatch → all-zero stage buffer（后端抽象前的
         // read_target_pixels 同语义）。
         px.assign(size_t(stage_w_) * stage_h_ * 4, 0);
@@ -709,6 +720,12 @@ bool RenderEngine::draw_group_gpu(const oa::render::Compositor& sc,
         backend_->set_draw_blend(BlendMode::Mod);
         backend_->set_draw_color(alpha_byte(cm[0]), alpha_byte(cm[1]),
                                  alpha_byte(cm[2]), 255);
+        backend_->fill_rect(full);
+    }
+    if (p.negative) {
+        // straight rgb' = 1 - rgb is premultiplied A - rgb (dst alpha kept)
+        backend_->set_draw_blend(BlendMode::PremultInvert);
+        backend_->set_draw_color(255, 255, 255, 255);
         backend_->fill_rect(full);
     }
     if (mask_tex) {
@@ -1231,10 +1248,15 @@ bool RenderEngine::pump_host_frames(bool* emote_presented) {
         if (gpu) {
             std::vector<oa::emote::EmoteDrawPart> parts;
             std::string err;
-            if (st.player->collect_pose_parts(&parts, &err) &&
-                emote_render_parts(tkey, st.player->file(), parts, st.width,
-                                   st.height)) {
-                presented = true;
+            bool posed = false;
+            {
+                oa::prof::Scope pose_scope(oa::prof::Stage::EmotePose);
+                posed = st.player->collect_pose_parts(&parts, &err);
+            }
+            if (posed) {
+                oa::prof::Scope draw_scope(oa::prof::Stage::EmoteDraw);
+                presented = emote_render_parts(tkey, st.player->file(), parts,
+                                               st.width, st.height);
             }
         }
         if (!presented) {
@@ -1717,19 +1739,41 @@ void RenderEngine::render_beigin()
     // per-frame glyph count (single paint point = node slot).
     frame_glyphs_ = 0;
 }
-void RenderEngine::render_clear_tex_cache()
+void RenderEngine::release_group_bake(TextureRef t)
 {
-    if (!backend_) return;
+    if (!t) return;
     // GPU bakes are stage targets of one size: keep a few for the next
     // frame's re-bake instead of allocating fresh ones every frame.
     constexpr size_t kGroupTargetPoolMax = 8;
-    for (auto& [k, t] : group_tex_cache) {
-        if (!t) continue;
-        if (gpu_group_bakes_.count(t) && group_target_pool_.size() < kGroupTargetPoolMax)
-            group_target_pool_.push_back(t);
-        else
-            backend_->destroy_texture(t);
+    if (gpu_group_bakes_.erase(t) && group_target_pool_.size() < kGroupTargetPoolMax)
+        group_target_pool_.push_back(t);
+    else
+        backend_->destroy_texture(t);
+}
+void RenderEngine::render_clear_tex_cache_containing(const std::vector<std::string>& ids)
+{
+    if (!backend_) return;
+    // A group's subtree is every id under its dotted id.
+    const auto holds = [&](const std::string& group) {
+        for (const std::string& id : ids)
+            if (id.size() >= group.size() && id.compare(0, group.size(), group) == 0 &&
+                (id.size() == group.size() || id[group.size()] == '.'))
+                return true;
+        return false;
+    };
+    for (auto it = group_tex_cache.begin(); it != group_tex_cache.end();) {
+        if (holds(it->first)) {
+            release_group_bake(it->second);
+            it = group_tex_cache.erase(it);
+        } else {
+            ++it;
+        }
     }
+}
+void RenderEngine::render_clear_tex_cache()
+{
+    if (!backend_) return;
+    for (auto& [k, t] : group_tex_cache) release_group_bake(t);
     group_tex_cache.clear();
     gpu_group_bakes_.clear();
     // anchor-frame bounds are scene-dependent — they must

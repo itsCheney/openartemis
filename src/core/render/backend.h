@@ -69,7 +69,9 @@ enum class BlendMode { None, Blend, Add, Mod,
                        PremultBlend, // dst = src + dst*(1-srcA)
                        PremultAdd,   // dstRGB += srcRGB, dstA kept
                        PremultMul,   // dstRGB = srcRGB*dstRGB + dstRGB*(1-srcA), dstA kept
-                       MaskMultiply }; // dst *= srcA (rgb and alpha; premultiplied mask)
+                       MaskMultiply, // dst *= srcA (rgb and alpha; premultiplied mask)
+                       PremultInvert }; // dstRGB = srcRGB*dstA - dstRGB, dstA kept
+                                        // (white src: premultiplied negative)
 
 /// 纹理创建方式（与引擎三种用法一一对应：静态贴图/流式逐帧刷新/离屏
 /// target）。
