@@ -370,7 +370,10 @@ struct EvalCtx {
 
 // node tick: parameter nodes map their variable to the axis; others keep the
 // incoming (motion) tick. Mirrors krkr (emotemotionref::getTickByIdx -> emoteVar
-// transToTick with the current var value; default 0).
+// transToTick with the current var value; default 0) — except that the mapping
+// clamps the normalised value into [0,1] (see EmoteVar::trans_to_tick): the
+// composed variable can overshoot the axis at a boundary pose, and a negative
+// tick would drop the parent's Level while children keep drawing.
 double node_tick(const EmoteMotion& m, const EmoteNode& n, double incoming,
                  const EvalCtx& ctx) {
     if (!n.isParameterized) return incoming;

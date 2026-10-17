@@ -4,6 +4,8 @@
 // down: spec/metadata/object{motion{node/frame}}/source{icon}/timeline/
 // variableList/controls. The krkr emotefile parser was the behavioural
 // reference for field meanings; nothing is copied from it.
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <memory>
@@ -24,10 +26,15 @@ struct EmoteVar {
     std::string id;
     double rangeBegin = 0;
     double rangeEnd = 1;
-    double division = 0; // transToTick = division * (v-rangeBegin)/(rangeEnd-rangeBegin)
+    double division = 0; // transToTick = division * clamp01((v-rangeBegin)/(rangeEnd-rangeBegin))
     double trans_to_tick(double v) const {
-        if (rangeEnd <= rangeBegin) return 0;
-        return division * (v - rangeBegin) / (rangeEnd - rangeBegin);
+        const double span = rangeEnd - rangeBegin;
+        if (!std::isfinite(v) || !std::isfinite(span) || span == 0.0 ||
+            !std::isfinite(division))
+            return 0.0;
+        const double pos = std::clamp((v - rangeBegin) / span, 0.0, 1.0);
+        const double axis = division > 0.0 ? division : 0.0;
+        return pos * axis;
     }
 };
 
