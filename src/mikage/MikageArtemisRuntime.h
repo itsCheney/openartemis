@@ -61,6 +61,30 @@ MikageArtemisStepResult MikageArtemisStep(void);
 // the next step.
 bool MikageArtemisSendBack(void);
 
+// Quick actions and the game menu's controls. Auto, skip and backlog take
+// the paths the game's own keys do, so its scripts apply their own rules
+// (a skip stops at unread text unless the game allows otherwise).
+typedef enum MikageArtemisCommand {
+    MikageArtemisCommandAuto = 1,
+    MikageArtemisCommandSkip = 2,
+    MikageArtemisCommandBacklog = 5,
+} MikageArtemisCommand;
+typedef enum MikageArtemisControl {
+    MikageArtemisControlAuto = 1 << 0,
+    MikageArtemisControlSkip = 1 << 1,
+    MikageArtemisControlCanAuto = 1 << 8,
+    MikageArtemisControlCanSkip = 1 << 9,
+    MikageArtemisControlCanBacklog = 1 << 12,
+} MikageArtemisControl;
+// Main thread, between steps.
+bool MikageArtemisRunCommand(int32_t command);
+uint32_t MikageArtemisGameControls(void);
+// Holds or releases Ctrl, which skips every line (read or not) while held.
+bool MikageArtemisSetControlSkip(bool held);
+// The host's trackpad cursor, as a mouse at x, y in window points.
+// phase: 0 move, 1 left down, 2 left up, 3 right down, 4 right up.
+bool MikageArtemisSendPointer(int32_t phase, float x, float y);
+
 // Ends the game on the next step. Artemis saves as it goes (system data on
 // every change), so nothing is lost by ending here.
 void MikageArtemisRequestStop(void);

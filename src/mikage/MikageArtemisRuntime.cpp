@@ -405,6 +405,74 @@ extern "C" bool MikageArtemisSendBack(void)
     return sent;
 }
 
+namespace {
+
+oa::runtime::GameRuntime *activeRuntime()
+{
+    return MikageSDLHostIsRunning() && appState ? appState->rt.get() : nullptr;
+}
+
+} // namespace
+
+extern "C" bool MikageArtemisRunCommand(int32_t command)
+{
+    // Between steps on the main thread, so never inside a runtime tick.
+    oa::runtime::GameRuntime *runtime = activeRuntime();
+    bool done = false;
+    if (runtime) {
+        switch (command) {
+        case MikageArtemisCommandAuto:
+            if (runtime->automode_allowed()) {
+                runtime->host_set_automode(!runtime->automode_active());
+                done = true;
+            }
+            break;
+        case MikageArtemisCommandSkip:
+            if (runtime->skip_allowed()) {
+                runtime->host_set_skip(!runtime->skip_enabled());
+                done = true;
+            }
+            break;
+        case MikageArtemisCommandBacklog:
+            runtime->host_open_backlog();
+            done = true;
+            break;
+        default:
+            break;
+        }
+    }
+    const std::string message = "runtime.command." + std::to_string(command) + (done ? ".done" : ".unavailable");
+    log("bridge", done ? 3 : 4, message.c_str());
+    return done;
+}
+
+extern "C" uint32_t MikageArtemisGameControls(void)
+{
+    oa::runtime::GameRuntime *runtime = activeRuntime();
+    if (!runtime)
+        return 0;
+    uint32_t controls = MikageArtemisControlCanBacklog;
+    if (runtime->automode_allowed())
+        controls |= MikageArtemisControlCanAuto;
+    if (runtime->skip_allowed())
+        controls |= MikageArtemisControlCanSkip;
+    if (runtime->automode_active())
+        controls |= MikageArtemisControlAuto;
+    if (runtime->skip_enabled())
+        controls |= MikageArtemisControlSkip;
+    return controls;
+}
+
+extern "C" bool MikageArtemisSetControlSkip(bool held)
+{
+    return MikageSDLHostSendKey(SDL_SCANCODE_LCTRL, SDLK_LCTRL, held);
+}
+
+extern "C" bool MikageArtemisSendPointer(int32_t phase, float x, float y)
+{
+    return MikageSDLHostSendPointer(phase, x, y);
+}
+
 extern "C" void MikageArtemisRequestStop(void)
 {
     MikageSDLHostRequestStop();

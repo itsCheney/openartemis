@@ -254,6 +254,17 @@ public:
     bool control_skip_effective() const;
     bool rclick_allowed() const;
 
+    // Host menu controls: the paths the game's own auto, skip and backlog
+    // keys take, so its Lua (autoskip.lua) applies its own rules, such as
+    // stopping a skip at unread text.
+    bool automode_allowed() const;
+    /// Command skip only; a held Ctrl is not counted.
+    bool skip_enabled() const;
+    bool skip_allowed() const;
+    void host_set_automode(bool enabled);
+    void host_set_skip(bool enabled);
+    void host_open_backlog();
+
     /// [lydrag] forced drag consumed from the event stream.
     void force_pointer_drag(const std::string& layer_id);
 

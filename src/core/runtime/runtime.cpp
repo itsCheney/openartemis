@@ -179,6 +179,12 @@ bool GameRuntime::automode_active() const { return s_->automode_active(); }
 bool GameRuntime::hide_active() const { return s_->hide_active(); }
 bool GameRuntime::control_skip_effective() const { return s_->control_skip_effective(); }
 bool GameRuntime::rclick_allowed() const { return s_->rclick_allowed(); }
+bool GameRuntime::automode_allowed() const { return s_->automode_allowed_; }
+bool GameRuntime::skip_enabled() const { return s_->skip_allowed_ && s_->skip_enabled_; }
+bool GameRuntime::skip_allowed() const { return s_->skip_allowed_; }
+void GameRuntime::host_set_automode(bool enabled) { s_->set_automode_mode(enabled); }
+void GameRuntime::host_set_skip(bool enabled) { s_->set_skip_mode(enabled); }
+void GameRuntime::host_open_backlog() { s_->dispatch_mode_input("backlogin"); }
 void GameRuntime::force_pointer_drag(const std::string& layer_id) { s_->force_pointer_drag(layer_id); }
 const oa::render::TextEngine& GameRuntime::text() const { return s_->text(); }
 oa::render::TextEngine& GameRuntime::text() { return s_->text(); }
