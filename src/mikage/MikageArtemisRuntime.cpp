@@ -428,8 +428,15 @@ extern "C" bool MikageArtemisRunCommand(int32_t command)
             }
             break;
         case MikageArtemisCommandSkip:
-            if (runtime->skip_allowed()) {
-                runtime->host_set_skip(!runtime->skip_enabled());
+            // Starting goes through the game's own skip button when it has
+            // one: its script decides whether unread text may be skipped.
+            if (runtime->skip_enabled()) {
+                runtime->host_set_skip(false);
+                done = true;
+            } else if (runtime->host_click_button("bt_skip")) {
+                done = true;
+            } else if (runtime->skip_allowed()) {
+                runtime->host_set_skip(true);
                 done = true;
             }
             break;

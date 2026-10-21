@@ -185,6 +185,7 @@ bool GameRuntime::skip_allowed() const { return s_->skip_allowed_; }
 void GameRuntime::host_set_automode(bool enabled) { s_->set_automode_mode(enabled); }
 void GameRuntime::host_set_skip(bool enabled) { s_->set_skip_mode(enabled); }
 void GameRuntime::host_open_backlog() { s_->dispatch_mode_input("backlogin"); }
+bool GameRuntime::host_click_button(const std::string& name) { return s_->click_button(name); }
 void GameRuntime::force_pointer_drag(const std::string& layer_id) { s_->force_pointer_drag(layer_id); }
 const oa::render::TextEngine& GameRuntime::text() const { return s_->text(); }
 oa::render::TextEngine& GameRuntime::text() { return s_->text(); }
@@ -2956,6 +2957,39 @@ void GameRuntime::RuntimeState::set_skip_mode(bool enabled) {
         reveal_all_text(); // reveal on skip exit so new text is not stuck
     }
     dispatch_mode_input(now_active ? "commandskipin" : "commandskipout");
+}
+
+bool GameRuntime::RuntimeState::click_button(const std::string& name) {
+    if (!interpreter_ || hide_active_) return false;
+    auto image_name = [](const std::string& file) {
+        std::string base = file.substr(file.find_last_of('/') + 1);
+        const size_t dot = base.find_last_of('.');
+        return dot == std::string::npos ? base : base.substr(0, dot);
+    };
+    // The image sits on the button layer or below it; the click row is on
+    // the nearest layer up the chain that has one. A shown button wins over
+    // one in a retracted dock.
+    const oa::render::SceneNode* button = nullptr;
+    const oa::render::LayerEventHandler* click = nullptr;
+    std::vector<const oa::render::SceneNode*> stack(scene_.roots().begin(), scene_.roots().end());
+    while (!stack.empty()) {
+        const oa::render::SceneNode* node = stack.back();
+        stack.pop_back();
+        stack.insert(stack.end(), node->children.begin(), node->children.end());
+        if (node->layer.file.empty() || image_name(node->layer.file) != name) continue;
+        for (const oa::render::SceneNode* n = node; n; n = n->parent) {
+            const auto* row = scene_.find_event_handler(n->layer.id, "click");
+            if (!row || !row->enabled) continue;
+            if (scene_.is_effectively_visible(n->layer.id)) {
+                return dispatch_layer_row(n->layer.id, *row, "click", {{"click", "1"}},
+                                          PointerDispatch::Kind::Click);
+            }
+            if (!button) { button = n; click = row; }
+            break;
+        }
+    }
+    return button && dispatch_layer_row(button->layer.id, *click, "click", {{"click", "1"}},
+                                        PointerDispatch::Kind::Click);
 }
 
 void GameRuntime::RuntimeState::set_automode_mode(bool enabled) {
