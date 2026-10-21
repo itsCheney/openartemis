@@ -414,41 +414,58 @@ oa::runtime::GameRuntime *activeRuntime()
 
 } // namespace
 
+namespace {
+
+/// The game's own button for a menu command: the story dock's image names
+/// in the common Artemis system scripts.
+const char *buttonFor(int32_t command)
+{
+    switch (command) {
+    case MikageArtemisCommandSkip: return "bt_skip";
+    case MikageArtemisCommandQuickSave: return "bt_qsave";
+    case MikageArtemisCommandQuickLoad: return "bt_qload";
+    case MikageArtemisCommandBacklog: return "bt_log";
+    case MikageArtemisCommandSave: return "bt_save";
+    case MikageArtemisCommandLoad: return "bt_load";
+    default: return nullptr;
+    }
+}
+
+} // namespace
+
 extern "C" bool MikageArtemisRunCommand(int32_t command)
 {
     // Between steps on the main thread, so never inside a runtime tick.
     oa::runtime::GameRuntime *runtime = activeRuntime();
     bool done = false;
+    std::string how;
     if (runtime) {
-        switch (command) {
-        case MikageArtemisCommandAuto:
+        const char *button = buttonFor(command);
+        if (command == MikageArtemisCommandAuto) {
             if (runtime->automode_allowed()) {
                 runtime->host_set_automode(!runtime->automode_active());
                 done = true;
             }
-            break;
-        case MikageArtemisCommandSkip:
-            // Starting goes through the game's own skip button when it has
-            // one: its script decides whether unread text may be skipped.
-            if (runtime->skip_enabled()) {
-                runtime->host_set_skip(false);
-                done = true;
-            } else if (runtime->host_click_button("bt_skip")) {
-                done = true;
-            } else if (runtime->skip_allowed()) {
-                runtime->host_set_skip(true);
-                done = true;
-            }
-            break;
-        case MikageArtemisCommandBacklog:
+        } else if (command == MikageArtemisCommandSkip && runtime->skip_enabled()) {
+            runtime->host_set_skip(false);
+            done = true;
+            how = ".stop";
+        } else if (button && runtime->host_tap_button(button)) {
+            // The game's own button, so its script applies its rules (a
+            // skip that refuses unread text) and opens its own screens.
+            done = true;
+            how = std::string(".tap.") + button;
+        } else if (command == MikageArtemisCommandSkip && runtime->skip_allowed()) {
+            runtime->host_set_skip(true);
+            done = true;
+            how = ".direct";
+        } else if (command == MikageArtemisCommandBacklog) {
             runtime->host_open_backlog();
             done = true;
-            break;
-        default:
-            break;
+            how = ".direct";
         }
     }
-    const std::string message = "runtime.command." + std::to_string(command) + (done ? ".done" : ".unavailable");
+    const std::string message = "runtime.command." + std::to_string(command) + (done ? ".done" : ".unavailable") + how;
     log("bridge", done ? 3 : 4, message.c_str());
     return done;
 }
@@ -467,6 +484,14 @@ extern "C" uint32_t MikageArtemisGameControls(void)
         controls |= MikageArtemisControlAuto;
     if (runtime->skip_enabled())
         controls |= MikageArtemisControlSkip;
+    if (runtime->host_has_button("bt_qsave"))
+        controls |= MikageArtemisControlCanQuickSave;
+    if (runtime->host_has_button("bt_qload"))
+        controls |= MikageArtemisControlCanQuickLoad;
+    if (runtime->host_has_button("bt_save"))
+        controls |= MikageArtemisControlCanSave;
+    if (runtime->host_has_button("bt_load"))
+        controls |= MikageArtemisControlCanLoad;
     return controls;
 }
 

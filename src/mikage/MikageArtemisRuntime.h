@@ -67,14 +67,22 @@ bool MikageArtemisSendBack(void);
 typedef enum MikageArtemisCommand {
     MikageArtemisCommandAuto = 1,
     MikageArtemisCommandSkip = 2,
+    MikageArtemisCommandQuickSave = 3,
+    MikageArtemisCommandQuickLoad = 4,
     MikageArtemisCommandBacklog = 5,
+    MikageArtemisCommandSave = 6,
+    MikageArtemisCommandLoad = 7,
 } MikageArtemisCommand;
 typedef enum MikageArtemisControl {
     MikageArtemisControlAuto = 1 << 0,
     MikageArtemisControlSkip = 1 << 1,
     MikageArtemisControlCanAuto = 1 << 8,
     MikageArtemisControlCanSkip = 1 << 9,
+    MikageArtemisControlCanQuickSave = 1 << 10,
+    MikageArtemisControlCanQuickLoad = 1 << 11,
     MikageArtemisControlCanBacklog = 1 << 12,
+    MikageArtemisControlCanSave = 1 << 13,
+    MikageArtemisControlCanLoad = 1 << 14,
 } MikageArtemisControl;
 // Main thread, between steps.
 bool MikageArtemisRunCommand(int32_t command);

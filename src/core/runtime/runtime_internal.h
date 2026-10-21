@@ -580,7 +580,11 @@ struct GameRuntime::RuntimeState {
     bool last_control_skip_effective_ = false;
     // Control-domain private machinery
     void set_skip_mode(bool enabled);
-    bool click_button(const std::string& name);
+    bool button_center(const std::string& name, int* x, int* y) const;
+    bool tap_button(const std::string& name);
+    void apply_host_tap(FrameInput& in);
+    std::string host_tap_name_; // button a host tap is pressing; "" none
+    int host_tap_frame_ = 0;
     void set_automode_mode(bool enabled);
     // automode pacing interval — the script var s.automodewait
     // (FPM clickAutomode writes it at every click park: automode_vowait for a

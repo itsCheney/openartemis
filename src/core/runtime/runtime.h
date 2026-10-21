@@ -264,11 +264,12 @@ public:
     void host_set_automode(bool enabled);
     void host_set_skip(bool enabled);
     void host_open_backlog();
-    /// Clicks the game's own button whose image is `name` (bt_skip), as a
-    /// tap on it would, so the script's own checks run (a skip button that
-    /// refuses unread text). False when no shown layer of that image has a
-    /// click handler.
-    bool host_click_button(const std::string& name);
+    /// Taps the game's own button whose image is `name` (bt_skip, bt_log,
+    /// bt_save...) over the next frames, as a finger would: hover, press,
+    /// release. Its script then runs with its own rules (a skip button that
+    /// refuses unread text). False when no layer shows that image.
+    bool host_tap_button(const std::string& name);
+    bool host_has_button(const std::string& name) const;
 
     /// [lydrag] forced drag consumed from the event stream.
     void force_pointer_drag(const std::string& layer_id);

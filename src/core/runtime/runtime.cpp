@@ -185,7 +185,11 @@ bool GameRuntime::skip_allowed() const { return s_->skip_allowed_; }
 void GameRuntime::host_set_automode(bool enabled) { s_->set_automode_mode(enabled); }
 void GameRuntime::host_set_skip(bool enabled) { s_->set_skip_mode(enabled); }
 void GameRuntime::host_open_backlog() { s_->dispatch_mode_input("backlogin"); }
-bool GameRuntime::host_click_button(const std::string& name) { return s_->click_button(name); }
+bool GameRuntime::host_tap_button(const std::string& name) { return s_->tap_button(name); }
+bool GameRuntime::host_has_button(const std::string& name) const {
+    int x = 0, y = 0;
+    return s_->button_center(name, &x, &y);
+}
 void GameRuntime::force_pointer_drag(const std::string& layer_id) { s_->force_pointer_drag(layer_id); }
 const oa::render::TextEngine& GameRuntime::text() const { return s_->text(); }
 oa::render::TextEngine& GameRuntime::text() { return s_->text(); }
@@ -712,8 +716,10 @@ void GameRuntime::RuntimeState::apply_override(int key, int status) {
     }
 }
 
-void GameRuntime::RuntimeState::tick(uint64_t delta_ms, const FrameInput& in) {
+void GameRuntime::RuntimeState::tick(uint64_t delta_ms, const FrameInput& raw_in) {
     if (!interpreter_) return;
+    FrameInput in = raw_in;
+    apply_host_tap(in);
     ++tick_count_;
     now_ms_ += delta_ms;
     // A captured transition may have reached its duration: auto-clear before
@@ -2959,37 +2965,62 @@ void GameRuntime::RuntimeState::set_skip_mode(bool enabled) {
     dispatch_mode_input(now_active ? "commandskipin" : "commandskipout");
 }
 
-bool GameRuntime::RuntimeState::click_button(const std::string& name) {
-    if (!interpreter_ || hide_active_) return false;
+bool GameRuntime::RuntimeState::button_center(const std::string& name, int* x, int* y) const {
     auto image_name = [](const std::string& file) {
         std::string base = file.substr(file.find_last_of('/') + 1);
         const size_t dot = base.find_last_of('.');
         return dot == std::string::npos ? base : base.substr(0, dot);
     };
-    // The image sits on the button layer or below it; the click row is on
-    // the nearest layer up the chain that has one. A shown button wins over
-    // one in a retracted dock.
-    const oa::render::SceneNode* button = nullptr;
-    const oa::render::LayerEventHandler* click = nullptr;
-    std::vector<const oa::render::SceneNode*> stack(scene_.roots().begin(), scene_.roots().end());
-    while (!stack.empty()) {
-        const oa::render::SceneNode* node = stack.back();
-        stack.pop_back();
-        stack.insert(stack.end(), node->children.begin(), node->children.end());
-        if (node->layer.file.empty() || image_name(node->layer.file) != name) continue;
-        for (const oa::render::SceneNode* n = node; n; n = n->parent) {
-            const auto* row = scene_.find_event_handler(n->layer.id, "click");
-            if (!row || !row->enabled) continue;
-            if (scene_.is_effectively_visible(n->layer.id)) {
-                return dispatch_layer_row(n->layer.id, *row, "click", {{"click", "1"}},
-                                          PointerDispatch::Kind::Click);
-            }
-            if (!button) { button = n; click = row; }
-            break;
+    // Shown copies first; a dock that hides its buttons still counts.
+    const oa::render::Layer* found = nullptr;
+    for (const oa::render::Layer* l : scene_.draw_order()) {
+        if (l->file.empty() || image_name(l->file) != name) continue;
+        if (scene_.is_effectively_visible(l->id)) { found = l; break; }
+        if (!found) found = l;
+    }
+    if (!found) return false;
+    double w = found->width > 0 ? found->width : 0, h = found->height > 0 ? found->height : 0;
+    if (hit_size_) {
+        if (const auto size = hit_size_(compositor_userdata_, *found)) {
+            w = size->first;
+            h = size->second;
         }
     }
-    return button && dispatch_layer_row(button->layer.id, *click, "click", {{"click", "1"}},
-                                        PointerDispatch::Kind::Click);
+    if (w <= 0 || h <= 0) return false;
+    double ox = 0, oy = 0, ow = 0, oh = 0;
+    if (!scene_.world_rect(found->id, w, h, &ox, &oy, &ow, &oh)) return false;
+    *x = int(ox + ow / 2);
+    *y = int(oy + oh / 2);
+    return true;
+}
+
+bool GameRuntime::RuntimeState::tap_button(const std::string& name) {
+    int x = 0, y = 0;
+    if (!interpreter_ || !button_center(name, &x, &y)) return false;
+    host_tap_name_ = name;
+    host_tap_frame_ = 0;
+    return true;
+}
+
+void GameRuntime::RuntimeState::apply_host_tap(FrameInput& in) {
+    // A tap as a finger makes it: the pointer rests on the button for a few
+    // frames (rollover, which the game's button scripts key on), then
+    // presses and releases. The button is found again each frame in case
+    // its dock is still sliding in.
+    constexpr int kHoverFrames = 8;
+    int x = 0, y = 0;
+    if (host_tap_name_.empty()) return;
+    if (!button_center(host_tap_name_, &x, &y)) {
+        host_tap_name_.clear();
+        return;
+    }
+    const int frame = host_tap_frame_++;
+    in.mouse_x = x;
+    in.mouse_y = y;
+    in.left_click_edge = frame == kHoverFrames;
+    in.left_down = frame == kHoverFrames || frame == kHoverFrames + 1;
+    in.right_click_edge = false;
+    if (frame >= kHoverFrames + 2) host_tap_name_.clear();
 }
 
 void GameRuntime::RuntimeState::set_automode_mode(bool enabled) {
