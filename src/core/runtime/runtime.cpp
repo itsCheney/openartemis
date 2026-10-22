@@ -188,7 +188,7 @@ void GameRuntime::host_open_backlog() { s_->dispatch_mode_input("backlogin"); }
 bool GameRuntime::host_tap_button(const std::string& name) { return s_->tap_button(name); }
 bool GameRuntime::host_has_button(const std::string& name) const {
     int x = 0, y = 0;
-    return s_->button_center(name, &x, &y);
+    return s_->button_center(name, &x, &y, nullptr);
 }
 void GameRuntime::force_pointer_drag(const std::string& layer_id) { s_->force_pointer_drag(layer_id); }
 const oa::render::TextEngine& GameRuntime::text() const { return s_->text(); }
@@ -2965,7 +2965,8 @@ void GameRuntime::RuntimeState::set_skip_mode(bool enabled) {
     dispatch_mode_input(now_active ? "commandskipin" : "commandskipout");
 }
 
-bool GameRuntime::RuntimeState::button_center(const std::string& name, int* x, int* y) const {
+bool GameRuntime::RuntimeState::button_center(const std::string& name, int* x, int* y,
+                                              bool* reachable) const {
     auto image_name = [](const std::string& file) {
         std::string base = file.substr(file.find_last_of('/') + 1);
         const size_t dot = base.find_last_of('.');
@@ -2979,8 +2980,16 @@ bool GameRuntime::RuntimeState::button_center(const std::string& name, int* x, i
         if (!found) found = l;
     }
     if (!found) return false;
-    double w = found->width > 0 ? found->width : 0, h = found->height > 0 ? found->height : 0;
-    if (hit_size_) {
+    // The hit test's own size precedence: box, then clip (a button sheet
+    // holding its normal, hover and pressed frames), then the texture.
+    double w = 0, h = 0;
+    if (found->width > 0 && found->height > 0) {
+        w = found->width;
+        h = found->height;
+    } else if (found->has_clip) {
+        w = found->clip_w;
+        h = found->clip_h;
+    } else if (hit_size_) {
         if (const auto size = hit_size_(compositor_userdata_, *found)) {
             w = size->first;
             h = size->second;
@@ -2991,35 +3000,56 @@ bool GameRuntime::RuntimeState::button_center(const std::string& name, int* x, i
     if (!scene_.world_rect(found->id, w, h, &ox, &oy, &ow, &oh)) return false;
     *x = int(ox + ow / 2);
     *y = int(oy + oh / 2);
+    if (reachable) {
+        // The pointer there reaches this button: the topmost layer that takes
+        // events at that point is the button or one of its parents.
+        *reachable = false;
+        for (const std::string& id : scene_.hit_test_all(*x, *y, hit_size_, compositor_userdata_, alpha_sampler_)) {
+            if (!scene_.has_any_enabled_handler(id)) continue;
+            *reachable = id == found->id || found->id.compare(0, id.size() + 1, id + ".") == 0;
+            break;
+        }
+    }
     return true;
 }
 
 bool GameRuntime::RuntimeState::tap_button(const std::string& name) {
     int x = 0, y = 0;
-    if (!interpreter_ || !button_center(name, &x, &y)) return false;
+    if (!interpreter_ || !button_center(name, &x, &y, nullptr)) return false;
     host_tap_name_ = name;
     host_tap_frame_ = 0;
+    host_tap_age_ = 0;
     return true;
 }
 
 void GameRuntime::RuntimeState::apply_host_tap(FrameInput& in) {
     // A tap as a finger makes it: the pointer rests on the button for a few
     // frames (rollover, which the game's button scripts key on), then
-    // presses and releases. The button is found again each frame in case
-    // its dock is still sliding in.
+    // presses and releases. The button is found again each frame, and the
+    // press waits until nothing covers it (a dock still sliding in); a tap
+    // that can't reach it in a second is dropped rather than land elsewhere.
     constexpr int kHoverFrames = 8;
-    int x = 0, y = 0;
+    constexpr int kGiveUpFrames = 60;
     if (host_tap_name_.empty()) return;
-    if (!button_center(host_tap_name_, &x, &y)) {
+    int x = 0, y = 0;
+    bool reachable = false;
+    if (!button_center(host_tap_name_, &x, &y, &reachable) || ++host_tap_age_ > kGiveUpFrames) {
+        std::fprintf(stderr, "[runtime] host tap %s dropped\n", host_tap_name_.c_str());
         host_tap_name_.clear();
         return;
     }
-    const int frame = host_tap_frame_++;
     in.mouse_x = x;
     in.mouse_y = y;
+    in.right_click_edge = false;
+    in.left_click_edge = false;
+    in.left_down = false;
+    if (!reachable && host_tap_frame_ <= kHoverFrames) {
+        host_tap_frame_ = 0;
+        return;
+    }
+    const int frame = host_tap_frame_++;
     in.left_click_edge = frame == kHoverFrames;
     in.left_down = frame == kHoverFrames || frame == kHoverFrames + 1;
-    in.right_click_edge = false;
     if (frame >= kHoverFrames + 2) host_tap_name_.clear();
 }
 
